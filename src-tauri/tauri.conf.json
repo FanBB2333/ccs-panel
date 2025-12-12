@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "CC Switch",
+  "productName": "CCS Panel",
   "version": "3.8.2",
-  "identifier": "com.ccswitch.desktop",
+  "identifier": "com.ccspanel.desktop",
   "build": {
     "frontendDist": "../dist",
     "devUrl": "http://localhost:3000",
@@ -55,7 +55,7 @@
   "plugins": {
     "deep-link": {
       "desktop": {
-        "schemes": ["ccswitch"]
+        "schemes": ["ccspanel"]
       }
     },
     "updater": {

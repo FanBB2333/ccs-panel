@@ -1,6 +1,6 @@
 use serde_json::json;
 
-use cc_switch_lib::{
+use ccs_panel_lib::{
     get_codex_auth_path, get_codex_config_path, read_json_file, switch_provider_test_hook,
     write_codex_live_atomic, AppError, AppType, McpApps, McpServer, MultiAppConfig, Provider,
 };
@@ -184,7 +184,7 @@ fn switch_provider_updates_claude_live_and_state() {
     reset_test_fs();
     let _home = ensure_test_home();
 
-    let settings_path = cc_switch_lib::get_claude_settings_path();
+    let settings_path = ccs_panel_lib::get_claude_settings_path();
     if let Some(parent) = settings_path.parent() {
         std::fs::create_dir_all(parent).expect("create claude settings dir");
     }

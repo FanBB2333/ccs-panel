@@ -64,13 +64,9 @@ export function ServerProvider({ children }: { children: React.ReactNode }) {
   });
 
   const [currentServerId, setCurrentServerId] = useState<string | null>(() => {
-    // 从 localStorage 加载当前选中的服务器
-    try {
-      const stored = localStorage.getItem(CURRENT_SERVER_KEY);
-      return stored || null;
-    } catch {
-      return null;
-    }
+    // 应用启动时始终显示服务器管理主页
+    // 用户需要主动选择一个服务器才能进入管理界面
+    return null;
   });
 
   // 是否在服务器管理主页
