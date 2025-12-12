@@ -90,8 +90,7 @@ function App() {
   // 根据当前服务器决定是从本地还是远程加载
   const { data, isLoading, refetch } = useProvidersQuery(activeApp, {
     isProxyRunning,
-    serverId: currentServer?.id || null,
-    isLocal: currentServer?.isLocal ?? true,
+    server: currentServer,
   });
   const providers = useMemo(() => data?.providers ?? {}, [data]);
   const currentProviderId = data?.currentProviderId ?? "";

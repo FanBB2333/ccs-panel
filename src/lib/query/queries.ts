@@ -5,6 +5,7 @@ import {
 } from "@tanstack/react-query";
 import { providersApi, settingsApi, usageApi, sshApi, type AppId } from "@/lib/api";
 import type { Provider, Settings, UsageResult } from "@/types";
+import type { ManagedServer } from "@/types/server";
 
 const sortProviders = (
   providers: Record<string, Provider>,
@@ -75,18 +76,18 @@ export interface ProvidersQueryData {
 
 export interface UseProvidersQueryOptions {
   isProxyRunning?: boolean; // 代理服务是否运行中
-  serverId?: string | null; // 服务器 ID，null 或 "local" 表示本地
-  isLocal?: boolean; // 是否是本地服务器
+  server?: ManagedServer | null; // 当前管理的服务器配置
 }
 
 export const useProvidersQuery = (
   appId: AppId,
   options?: UseProvidersQueryOptions,
 ): UseQueryResult<ProvidersQueryData> => {
-  const { isProxyRunning = false, serverId = null, isLocal = true } = options || {};
+  const { isProxyRunning = false, server = null } = options || {};
 
-  // 判断是否从远程加载：有 serverId 且不是本地服务器
-  const isRemote = serverId !== null && serverId !== "local" && !isLocal;
+  // 判断是否从远程加载：有 server 且不是本地服务器
+  const isRemote = server !== null && !server.isLocal && server.connectionType === "ssh";
+  const serverId = server?.id;
 
   return useQuery({
     queryKey: ["providers", appId, serverId || "local"],
@@ -103,6 +104,7 @@ export const useProvidersQuery = (
         // 远程服务器：从 SSH 加载配置
         try {
           console.log("[useProvidersQuery] Loading remote config for server:", serverId, "app:", appId);
+          // 使用当前管理的服务器配置读取远程文件
           const remoteConfig = await sshApi.readRemoteConfig(serverId, appId);
           providers = parseRemoteProviders(remoteConfig.providers);
           currentProviderId = remoteConfig.current_provider_id || "";
@@ -111,7 +113,7 @@ export const useProvidersQuery = (
           console.error("获取远程供应商列表失败:", error);
         }
       } else {
-        // 本地服务器：使用原有逻辑
+        // 本地服务器：读取本地配置文件
         try {
           providers = await providersApi.getAll(appId);
         } catch (error) {

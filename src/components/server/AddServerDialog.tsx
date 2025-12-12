@@ -78,6 +78,7 @@ export function AddServerDialog({
       name: name.trim(),
       connectionType: "ssh",
       status: "disconnected",
+      isLocal: false, // 远程服务器
       sshConfig: {
         host: host.trim(),
         port: parseInt(port) || 22,
