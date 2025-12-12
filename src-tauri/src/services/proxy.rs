@@ -298,6 +298,37 @@ impl ProxyService {
         Ok(())
     }
 
+    /// 崩溃恢复：仅恢复 Live 配置，不需要代理正在运行
+    ///
+    /// 用于应用启动时检测到上次异常退出（接管状态为 true 但代理未运行）的情况。
+    pub async fn recover_from_crash(&self) -> Result<(), String> {
+        log::info!("开始崩溃恢复...");
+
+        // 1. 恢复原始 Live 配置
+        self.restore_live_configs().await?;
+
+        // 2. 清除接管状态
+        self.db
+            .set_live_takeover_active(false)
+            .await
+            .map_err(|e| format!("清除接管状态失败: {e}"))?;
+
+        // 3. 删除备份
+        self.db
+            .delete_all_live_backups()
+            .await
+            .map_err(|e| format!("删除备份失败: {e}"))?;
+
+        // 4. 确保 enabled 状态为 false，避免恢复后又自动启动
+        if let Ok(mut config) = self.db.get_proxy_config().await {
+            config.enabled = false;
+            let _ = self.db.update_proxy_config(config).await;
+        }
+
+        log::info!("崩溃恢复完成，Live 配置已恢复");
+        Ok(())
+    }
+
     /// 备份各应用的 Live 配置
     async fn backup_live_configs(&self) -> Result<(), String> {
         // Claude

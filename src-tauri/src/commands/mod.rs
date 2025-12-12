@@ -12,6 +12,7 @@ mod provider;
 mod proxy;
 mod settings;
 pub mod skill;
+mod ssh;
 mod stream_check;
 mod usage;
 
@@ -27,5 +28,6 @@ pub use provider::*;
 pub use proxy::*;
 pub use settings::*;
 pub use skill::*;
+pub use ssh::*;
 pub use stream_check::*;
 pub use usage::*;

@@ -1,4 +1,4 @@
-import { Server, Laptop, Trash2, Settings, Wifi, WifiOff } from "lucide-react";
+import { Server, Laptop, Trash2, Settings, Wifi, WifiOff, Loader2, Unplug } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import type { ManagedServer } from "@/types/server";
 import { cn } from "@/lib/utils";
@@ -16,6 +16,8 @@ interface ServerCardProps {
   onClick: () => void;
   onEdit?: () => void;
   onDelete?: () => void;
+  onDisconnect?: () => void;
+  isConnecting?: boolean;
 }
 
 export function ServerCard({
@@ -23,11 +25,14 @@ export function ServerCard({
   onClick,
   onEdit,
   onDelete,
+  onDisconnect,
+  isConnecting = false,
 }: ServerCardProps) {
   const { t } = useTranslation();
 
   const isLocal = server.isLocal;
   const isConnected = server.status === "connected";
+  const isCurrentConnecting = isConnecting || server.status === "connecting";
 
   const statusColor = {
     connected: "text-emerald-500",
@@ -96,6 +101,17 @@ export function ServerCard({
                   {t("common.edit", { defaultValue: "编辑" })}
                 </DropdownMenuItem>
               )}
+              {onDisconnect && isConnected && (
+                <DropdownMenuItem
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onDisconnect();
+                  }}
+                >
+                  <Unplug className="h-4 w-4 mr-2" />
+                  {t("server.disconnect", { defaultValue: "断开连接" })}
+                </DropdownMenuItem>
+              )}
               {onDelete && (
                 <DropdownMenuItem
                   className="text-destructive focus:text-destructive"
@@ -127,7 +143,9 @@ export function ServerCard({
 
       {/* 状态指示器 */}
       <div className="flex items-center gap-2 mt-auto">
-        {isConnected ? (
+        {isCurrentConnecting ? (
+          <Loader2 className={cn("w-4 h-4 animate-spin", statusColor)} />
+        ) : isConnected ? (
           <Wifi className={cn("w-4 h-4", statusColor)} />
         ) : (
           <WifiOff className={cn("w-4 h-4", statusColor)} />

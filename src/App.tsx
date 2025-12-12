@@ -59,9 +59,11 @@ function App() {
     currentServer,
     goBackToServerHome,
     addServer,
+    updateServer,
     removeServer,
   } = useServer();
   const [isAddServerOpen, setIsAddServerOpen] = useState(false);
+  const [editingServer, setEditingServer] = useState<ManagedServer | null>(null);
   const [confirmDeleteServer, setConfirmDeleteServer] =
     useState<ManagedServer | null>(null);
 
@@ -85,8 +87,11 @@ function App() {
   const { isRunning: isProxyRunning, isTakeoverActive } = useProxyStatus();
 
   // 获取供应商列表，当代理服务运行时自动刷新
+  // 根据当前服务器决定是从本地还是远程加载
   const { data, isLoading, refetch } = useProvidersQuery(activeApp, {
     isProxyRunning,
+    serverId: currentServer?.id || null,
+    isLocal: currentServer?.isLocal ?? true,
   });
   const providers = useMemo(() => data?.providers ?? {}, [data]);
   const currentProviderId = data?.currentProviderId ?? "";
@@ -615,13 +620,20 @@ function App() {
 
       <main
         className={`flex-1 overflow-y-auto pb-12 animate-fade-in scroll-overlay ${
-          isOnServerHome || currentView === "providers" ? "pt-24" : "pt-20"
+          isOnServerHome ? "pt-24" : currentView === "providers" ? "pt-28" : "pt-20"
         }`}
         style={{ overflowX: "hidden" }}
       >
         {isOnServerHome ? (
           <ServerHome
             onAddServer={() => setIsAddServerOpen(true)}
+            onEditServer={(serverId) => {
+              const server = servers[serverId];
+              if (server) {
+                setEditingServer(server);
+                setIsAddServerOpen(true);
+              }
+            }}
             onDeleteServer={(serverId) => {
               const server = servers[serverId];
               if (server) {
@@ -682,8 +694,27 @@ function App() {
       {/* 服务器管理相关对话框 */}
       <AddServerDialog
         open={isAddServerOpen}
-        onOpenChange={setIsAddServerOpen}
-        onSubmit={addServer}
+        onOpenChange={(open) => {
+          setIsAddServerOpen(open);
+          if (!open) {
+            setEditingServer(null);
+          }
+        }}
+        editingServer={editingServer}
+        onSubmit={(serverData) => {
+          if (editingServer) {
+            // 编辑模式：更新服务器
+            updateServer({
+              ...serverData,
+              id: editingServer.id,
+              createdAt: editingServer.createdAt,
+            });
+          } else {
+            // 新建模式：添加服务器
+            addServer(serverData);
+          }
+          setEditingServer(null);
+        }}
       />
 
       <ConfirmDialog

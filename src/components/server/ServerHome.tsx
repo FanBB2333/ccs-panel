@@ -16,7 +16,7 @@ export function ServerHome({
   onDeleteServer,
 }: ServerHomeProps) {
   const { t } = useTranslation();
-  const { servers, selectServer } = useServer();
+  const { servers, selectServer, isConnecting, disconnectFromServer } = useServer();
 
   // 将服务器转换为数组并排序（本地服务器在最前面）
   const serverList = Object.values(servers).sort((a, b) => {
@@ -66,6 +66,12 @@ export function ServerHome({
                   ? () => onDeleteServer(server.id)
                   : undefined
               }
+              onDisconnect={
+                !server.isLocal
+                  ? () => disconnectFromServer(server.id)
+                  : undefined
+              }
+              isConnecting={isConnecting && server.status === "connecting"}
             />
           ))}
         </div>

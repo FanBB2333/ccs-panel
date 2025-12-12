@@ -7,6 +7,7 @@ pub mod provider;
 pub mod proxy;
 pub mod skill;
 pub mod speedtest;
+pub mod ssh;
 pub mod stream_check;
 pub mod usage_stats;
 
@@ -17,6 +18,7 @@ pub use provider::{ProviderService, ProviderSortUpdate};
 pub use proxy::ProxyService;
 pub use skill::{Skill, SkillRepo, SkillService};
 pub use speedtest::{EndpointLatency, SpeedtestService};
+pub use ssh::{ConnectionStatus, RemoteConfig, SshConfig, SshError, SshService};
 #[allow(unused_imports)]
 pub use usage_stats::{
     DailyStats, LogFilters, ModelStats, PaginatedLogs, ProviderLimitStatus, ProviderStats,

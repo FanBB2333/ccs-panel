@@ -1,4 +1,4 @@
-import { useState, useCallback } from "react";
+import { useState, useCallback, useEffect } from "react";
 import { useTranslation } from "react-i18next";
 import { Server, Key, Lock, Eye, EyeOff, FolderOpen } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -24,28 +24,42 @@ export function AddServerDialog({
   const isEditing = Boolean(editingServer);
 
   // 表单状态
-  const [name, setName] = useState(editingServer?.name || "");
-  const [host, setHost] = useState(editingServer?.sshConfig?.host || "");
-  const [port, setPort] = useState(
-    editingServer?.sshConfig?.port?.toString() || "22"
-  );
-  const [username, setUsername] = useState(
-    editingServer?.sshConfig?.username || ""
-  );
-  const [authType, setAuthType] = useState<SSHAuthType>(
-    editingServer?.sshConfig?.authType || "password"
-  );
-  const [password, setPassword] = useState(
-    editingServer?.sshConfig?.password || ""
-  );
-  const [privateKeyPath, setPrivateKeyPath] = useState(
-    editingServer?.sshConfig?.privateKeyPath || ""
-  );
-  const [passphrase, setPassphrase] = useState(
-    editingServer?.sshConfig?.passphrase || ""
-  );
+  const [name, setName] = useState("");
+  const [host, setHost] = useState("");
+  const [port, setPort] = useState("22");
+  const [username, setUsername] = useState("");
+  const [authType, setAuthType] = useState<SSHAuthType>("password");
+  const [password, setPassword] = useState("");
+  const [privateKeyPath, setPrivateKeyPath] = useState("");
+  const [passphrase, setPassphrase] = useState("");
   const [showPassword, setShowPassword] = useState(false);
   const [showPassphrase, setShowPassphrase] = useState(false);
+
+  // 当 editingServer 变化时更新表单
+  useEffect(() => {
+    if (editingServer) {
+      setName(editingServer.name || "");
+      setHost(editingServer.sshConfig?.host || "");
+      setPort(editingServer.sshConfig?.port?.toString() || "22");
+      setUsername(editingServer.sshConfig?.username || "");
+      setAuthType(editingServer.sshConfig?.authType || "password");
+      setPassword(editingServer.sshConfig?.password || "");
+      setPrivateKeyPath(editingServer.sshConfig?.privateKeyPath || "");
+      setPassphrase(editingServer.sshConfig?.passphrase || "");
+    } else {
+      // 重置表单
+      setName("");
+      setHost("");
+      setPort("22");
+      setUsername("");
+      setAuthType("password");
+      setPassword("");
+      setPrivateKeyPath("");
+      setPassphrase("");
+    }
+    setShowPassword(false);
+    setShowPassphrase(false);
+  }, [editingServer, open]);
 
   // 表单验证
   const isValid =
@@ -55,20 +69,6 @@ export function AddServerDialog({
     (authType === "password"
       ? password.trim() !== ""
       : privateKeyPath.trim() !== "");
-
-  // 重置表单
-  const resetForm = useCallback(() => {
-    setName("");
-    setHost("");
-    setPort("22");
-    setUsername("");
-    setAuthType("password");
-    setPassword("");
-    setPrivateKeyPath("");
-    setPassphrase("");
-    setShowPassword(false);
-    setShowPassphrase(false);
-  }, []);
 
   // 提交表单
   const handleSubmit = useCallback(() => {
@@ -93,7 +93,6 @@ export function AddServerDialog({
     };
 
     onSubmit(serverData);
-    resetForm();
     onOpenChange(false);
   }, [
     isValid,
@@ -106,15 +105,13 @@ export function AddServerDialog({
     privateKeyPath,
     passphrase,
     onSubmit,
-    resetForm,
     onOpenChange,
   ]);
 
   // 关闭对话框
   const handleClose = useCallback(() => {
-    resetForm();
     onOpenChange(false);
-  }, [resetForm, onOpenChange]);
+  }, [onOpenChange]);
 
   return (
     <FullScreenPanel

@@ -522,10 +522,35 @@ pub fn run() {
                 }
             }
 
-            // 自动启动代理服务器
+            // 崩溃恢复：检查上次是否异常退出（接管状态为 true 但代理未运行）
+            // 如果是，则从备份恢复 Live 配置
             let app_handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
                 let state = app_handle.state::<AppState>();
+                
+                // 检查是否需要崩溃恢复
+                if let Ok(is_takeover_active) = state.db.is_live_takeover_active().await {
+                    if is_takeover_active && !state.proxy_service.is_running().await {
+                        log::warn!("检测到上次异常退出：接管状态为 true 但代理未运行，正在恢复 Live 配置...");
+                        
+                        // 尝试恢复 Live 配置
+                        match state.proxy_service.recover_from_crash().await {
+                            Ok(_) => log::info!("已成功恢复 Live 配置"),
+                            Err(e) => {
+                                log::error!("恢复 Live 配置失败: {e}");
+                                // 即使恢复失败，也清除接管状态，避免每次启动都尝试恢复
+                                if let Err(e2) = state.db.set_live_takeover_active(false).await {
+                                    log::error!("清除接管状态失败: {e2}");
+                                }
+                                if let Err(e3) = state.db.delete_all_live_backups().await {
+                                    log::error!("删除备份失败: {e3}");
+                                }
+                            }
+                        }
+                    }
+                }
+                
+                // 自动启动代理服务器（如果配置为启用）
                 match state.db.get_proxy_config().await {
                     Ok(config) => {
                         if config.enabled {
@@ -680,6 +705,13 @@ pub fn run() {
             commands::get_stream_check_config,
             commands::save_stream_check_config,
             commands::get_tool_versions,
+            // SSH remote server management
+            commands::ssh_connect,
+            commands::ssh_disconnect,
+            commands::ssh_get_status,
+            commands::ssh_test_connection,
+            commands::ssh_read_remote_config,
+            commands::ssh_execute,
         ]);
 
     let app = builder
