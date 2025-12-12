@@ -1,12 +1,13 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
-import { providersApi, settingsApi, type AppId } from "@/lib/api";
+import type { ManagedServer } from "@/types/server";
+import { providersApi, settingsApi, sshApi, type AppId } from "@/lib/api";
 import type { Provider, Settings } from "@/types";
 import { extractErrorMessage } from "@/utils/errorUtils";
 import { generateUUID } from "@/utils/uuid";
 
-export const useAddProviderMutation = (appId: AppId) => {
+export const useAddProviderMutation = (appId: AppId, server?: ManagedServer | null) => {
   const queryClient = useQueryClient();
   const { t } = useTranslation();
 
@@ -17,20 +18,28 @@ export const useAddProviderMutation = (appId: AppId) => {
         id: generateUUID(),
         createdAt: Date.now(),
       };
-      await providersApi.add(newProvider, appId);
+
+      if (server && !server.isLocal && server.connectionType === "ssh") {
+        await sshApi.addRemoteProvider(server.id, newProvider, appId);
+      } else {
+        await providersApi.add(newProvider, appId);
+      }
       return newProvider;
     },
     onSuccess: async () => {
-      await queryClient.invalidateQueries({ queryKey: ["providers", appId] });
+      const queryKey = ["providers", appId, server?.id || "local"];
+      await queryClient.invalidateQueries({ queryKey });
 
-      // 更新托盘菜单（失败不影响主操作）
-      try {
-        await providersApi.updateTrayMenu();
-      } catch (trayError) {
-        console.error(
-          "Failed to update tray menu after adding provider",
-          trayError,
-        );
+      // 仅本地模式更新托盘菜单（失败不影响主操作）
+      if (!server || server.isLocal) {
+        try {
+          await providersApi.updateTrayMenu();
+        } catch (trayError) {
+          console.error(
+            "Failed to update tray menu after adding provider",
+            trayError,
+          );
+        }
       }
 
       toast.success(

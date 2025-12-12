@@ -12,6 +12,9 @@ import {
 } from "@/lib/query";
 import { extractErrorMessage } from "@/utils/errorUtils";
 
+import { useServer } from "@/contexts/ServerContext";
+// ... (existing imports)
+
 /**
  * Hook for managing provider actions (add, update, delete, switch)
  * Extracts business logic from App.tsx
@@ -19,8 +22,9 @@ import { extractErrorMessage } from "@/utils/errorUtils";
 export function useProviderActions(activeApp: AppId) {
   const { t } = useTranslation();
   const queryClient = useQueryClient();
+  const { currentServer } = useServer();
 
-  const addProviderMutation = useAddProviderMutation(activeApp);
+  const addProviderMutation = useAddProviderMutation(activeApp, currentServer);
   const updateProviderMutation = useUpdateProviderMutation(activeApp);
   const deleteProviderMutation = useDeleteProviderMutation(activeApp);
   const switchProviderMutation = useSwitchProviderMutation(activeApp);

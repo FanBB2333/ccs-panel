@@ -78,4 +78,15 @@ export const sshApi = {
   execute: async (serverId: string, command: string): Promise<string> => {
     return invoke("ssh_execute", { serverId, command });
   },
+
+  /**
+   * 添加远程供应商
+   */
+  addRemoteProvider: async (
+    serverId: string,
+    provider: unknown,
+    appType: string
+  ): Promise<void> => {
+    return invoke("ssh_add_remote_provider", { serverId, provider, appType });
+  },
 };

@@ -146,3 +146,18 @@ pub async fn ssh_execute(
         .await
         .map_err(ssh_error_to_string)
 }
+
+/// 添加远程供应商
+#[tauri::command]
+pub async fn ssh_add_remote_provider(
+    state: State<'_, AppState>,
+    server_id: String,
+    provider: serde_json::Value,
+    app_type: String,
+) -> Result<(), String> {
+    state
+        .ssh_service
+        .add_remote_provider(&server_id, &provider, &app_type)
+        .await
+        .map_err(ssh_error_to_string)
+}
