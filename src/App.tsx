@@ -11,9 +11,11 @@ import {
   Wrench,
   Server,
   RefreshCw,
+  Laptop,
 } from "lucide-react";
 import type { Provider } from "@/types";
 import type { EnvConflict } from "@/types/env";
+import type { ManagedServer } from "@/types/server";
 import { useProvidersQuery } from "@/lib/query";
 import {
   providersApi,
@@ -24,6 +26,7 @@ import {
 import { checkAllEnvConflicts, checkEnvConflicts } from "@/lib/api/env";
 import { useProviderActions } from "@/hooks/useProviderActions";
 import { useProxyStatus } from "@/hooks/useProxyStatus";
+import { useServer } from "@/contexts/ServerContext";
 import { extractErrorMessage } from "@/utils/errorUtils";
 import { cn } from "@/lib/utils";
 import { AppSwitcher } from "@/components/AppSwitcher";
@@ -42,11 +45,25 @@ import { SkillsPage } from "@/components/skills/SkillsPage";
 import { DeepLinkImportDialog } from "@/components/DeepLinkImportDialog";
 import { AgentsPanel } from "@/components/agents/AgentsPanel";
 import { Button } from "@/components/ui/button";
+import { ServerHome, AddServerDialog } from "@/components/server";
 
 type View = "providers" | "settings" | "prompts" | "skills" | "mcp" | "agents";
 
 function App() {
   const { t } = useTranslation();
+
+  // 服务器管理状态
+  const {
+    servers,
+    isOnServerHome,
+    currentServer,
+    goBackToServerHome,
+    addServer,
+    removeServer,
+  } = useServer();
+  const [isAddServerOpen, setIsAddServerOpen] = useState(false);
+  const [confirmDeleteServer, setConfirmDeleteServer] =
+    useState<ManagedServer | null>(null);
 
   const [activeApp, setActiveApp] = useState<AppId>("claude");
   const [currentView, setCurrentView] = useState<View>("providers");
@@ -392,7 +409,32 @@ function App() {
             className="flex items-center gap-1"
             style={{ WebkitAppRegion: "no-drag" } as any}
           >
-            {currentView !== "providers" ? (
+            {/* 一级页面：服务器管理主页 */}
+            {isOnServerHome ? (
+              <>
+                <div className="flex items-center gap-2">
+                  <a
+                    href="https://github.com/farion1231/cc-switch"
+                    target="_blank"
+                    rel="noreferrer"
+                    className="text-xl font-semibold transition-colors text-blue-500 hover:text-blue-600 dark:text-blue-400 dark:hover:text-blue-300"
+                  >
+                    CCS Panel
+                  </a>
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    onClick={() => setCurrentView("settings")}
+                    title={t("common.settings")}
+                    className="hover:bg-black/5 dark:hover:bg-white/5"
+                  >
+                    <Settings className="h-4 w-4" />
+                  </Button>
+                </div>
+                <UpdateBadge onClick={() => setCurrentView("settings")} />
+              </>
+            ) : currentView !== "providers" ? (
+              /* 二级页面的子页面（settings/prompts等） */
               <div className="flex items-center gap-2">
                 <Button
                   variant="outline"
@@ -412,14 +454,34 @@ function App() {
                 </h1>
               </div>
             ) : (
+              /* 二级页面：供应商管理 - 显示当前服务器信息和返回按钮 */
               <>
                 <div className="flex items-center gap-2">
+                  <Button
+                    variant="outline"
+                    size="icon"
+                    onClick={goBackToServerHome}
+                    className="mr-2 rounded-lg"
+                    title={t("server.backToList", { defaultValue: "返回服务器列表" })}
+                  >
+                    <ArrowLeft className="h-4 w-4" />
+                  </Button>
+                  <div className="flex items-center gap-2">
+                    {currentServer?.isLocal ? (
+                      <Laptop className="h-4 w-4 text-blue-500" />
+                    ) : (
+                      <Server className="h-4 w-4 text-orange-500" />
+                    )}
+                    <span className="text-sm font-medium text-muted-foreground">
+                      {currentServer?.name || t("server.unknown", { defaultValue: "未知服务器" })}
+                    </span>
+                  </div>
                   <a
                     href="https://github.com/farion1231/cc-switch"
                     target="_blank"
                     rel="noreferrer"
                     className={cn(
-                      "text-xl font-semibold transition-colors",
+                      "text-xl font-semibold transition-colors ml-2",
                       isProxyRunning && isTakeoverActive
                         ? "text-emerald-500 hover:text-emerald-600 dark:text-emerald-400 dark:hover:text-emerald-300"
                         : "text-blue-500 hover:text-blue-600 dark:text-blue-400 dark:hover:text-blue-300"
@@ -488,7 +550,7 @@ function App() {
                 </Button>
               </>
             )}
-            {currentView === "providers" && (
+            {currentView === "providers" && !isOnServerHome && (
               <>
                 <ProxyToggle />
 
@@ -553,11 +615,23 @@ function App() {
 
       <main
         className={`flex-1 overflow-y-auto pb-12 animate-fade-in scroll-overlay ${
-          currentView === "providers" ? "pt-24" : "pt-20"
+          isOnServerHome || currentView === "providers" ? "pt-24" : "pt-20"
         }`}
         style={{ overflowX: "hidden" }}
       >
-        {renderContent()}
+        {isOnServerHome ? (
+          <ServerHome
+            onAddServer={() => setIsAddServerOpen(true)}
+            onDeleteServer={(serverId) => {
+              const server = servers[serverId];
+              if (server) {
+                setConfirmDeleteServer(server);
+              }
+            }}
+          />
+        ) : (
+          renderContent()
+        )}
       </main>
 
       <AddProviderDialog
@@ -603,6 +677,33 @@ function App() {
         }
         onConfirm={() => void handleConfirmDelete()}
         onCancel={() => setConfirmDelete(null)}
+      />
+
+      {/* 服务器管理相关对话框 */}
+      <AddServerDialog
+        open={isAddServerOpen}
+        onOpenChange={setIsAddServerOpen}
+        onSubmit={addServer}
+      />
+
+      <ConfirmDialog
+        isOpen={Boolean(confirmDeleteServer)}
+        title={t("server.confirmDelete", { defaultValue: "删除服务器" })}
+        message={
+          confirmDeleteServer
+            ? t("server.confirmDeleteMessage", {
+                defaultValue: `确定要删除服务器 "${confirmDeleteServer.name}" 吗？`,
+                name: confirmDeleteServer.name,
+              })
+            : ""
+        }
+        onConfirm={() => {
+          if (confirmDeleteServer) {
+            removeServer(confirmDeleteServer.id);
+            setConfirmDeleteServer(null);
+          }
+        }}
+        onCancel={() => setConfirmDeleteServer(null)}
       />
 
       <DeepLinkImportDialog />
