@@ -6,6 +6,7 @@ use async_ssh2_tokio::client::{AuthMethod, Client, ServerCheckMethod};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::process::Child;
 use std::sync::Arc;
 use thiserror::Error;
 use tokio::sync::RwLock;
@@ -25,6 +26,8 @@ pub enum SshError {
     InvalidConfig(String),
     #[error("Server not connected")]
     NotConnected,
+    #[error("Port forwarding failed: {0}")]
+    PortForwardingFailed(String),
 }
 
 /// SSH 认证方式
@@ -76,7 +79,19 @@ pub struct RemoteConfig {
     pub proxy_target_provider_id: Option<String>,
 }
 
+/// 端口转发状态
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PortForwardingStatus {
+    /// 是否正在运行
+    pub is_active: bool,
+    /// 本地地址 (例如 127.0.0.1:5000)
+    pub local_address: String,
+    /// 远程端口
+    pub remote_port: u16,
+}
+
 /// SSH 服务
+#[derive(Clone)]
 pub struct SshService {
     /// 活跃的 SSH 连接 (server_id -> client)
     connections: Arc<RwLock<HashMap<String, Client>>>,
@@ -84,6 +99,10 @@ pub struct SshService {
     status: Arc<RwLock<HashMap<String, ConnectionStatus>>>,
     /// 服务器配置 (server_id -> config)
     configs: Arc<RwLock<HashMap<String, SshConfig>>>,
+    /// 端口转发进程 (server_id -> child process)
+    port_forwards: Arc<RwLock<HashMap<String, Child>>>,
+    /// 端口转发状态 (server_id -> status)
+    port_forward_status: Arc<RwLock<HashMap<String, PortForwardingStatus>>>,
 }
 
 impl SshService {
@@ -92,6 +111,8 @@ impl SshService {
             connections: Arc::new(RwLock::new(HashMap::new())),
             status: Arc::new(RwLock::new(HashMap::new())),
             configs: Arc::new(RwLock::new(HashMap::new())),
+            port_forwards: Arc::new(RwLock::new(HashMap::new())),
+            port_forward_status: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -1078,6 +1099,203 @@ impl SshService {
         }
 
         Ok(())
+    }
+
+    /// 启动 SSH 远程端口转发
+    ///
+    /// 这会创建一个 SSH 隧道，将本地服务器的端口转发到远程服务器
+    /// 使用 ssh -R remote_port:local_host:local_port 命令
+    pub async fn start_port_forwarding(
+        &self,
+        server_id: &str,
+        local_address: &str,
+        remote_port: u16,
+    ) -> Result<PortForwardingStatus, SshError> {
+        log::info!(
+            "[start_port_forwarding] Starting port forwarding for server: {}, local: {}, remote port: {}",
+            server_id,
+            local_address,
+            remote_port
+        );
+
+        // 检查是否已有转发进程在运行
+        {
+            let forwards = self.port_forwards.read().await;
+            if forwards.contains_key(server_id) {
+                log::warn!("[start_port_forwarding] Port forwarding already active for server: {}", server_id);
+                // 返回当前状态
+                let status = self.port_forward_status.read().await;
+                if let Some(s) = status.get(server_id) {
+                    return Ok(s.clone());
+                }
+            }
+        }
+
+        // 获取服务器配置
+        let config = {
+            let configs = self.configs.read().await;
+            configs.get(server_id).cloned().ok_or(SshError::NotConnected)?
+        };
+
+        // 构建 SSH 命令
+        // ssh -N -R remote_port:localhost:local_port user@host -p port
+        let ssh_args = self.build_ssh_args(&config, local_address, remote_port)?;
+
+        log::info!("[start_port_forwarding] SSH command args: {:?}", ssh_args);
+
+        // 启动 SSH 进程
+        let child = std::process::Command::new("ssh")
+            .args(&ssh_args)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .map_err(|e| SshError::PortForwardingFailed(format!("Failed to start SSH process: {}", e)))?;
+
+        // 等待一小段时间确认进程启动成功
+        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+
+        // 保存进程和状态
+        let status = PortForwardingStatus {
+            is_active: true,
+            local_address: local_address.to_string(),
+            remote_port,
+        };
+
+        {
+            let mut forwards = self.port_forwards.write().await;
+            forwards.insert(server_id.to_string(), child);
+        }
+        {
+            let mut pf_status = self.port_forward_status.write().await;
+            pf_status.insert(server_id.to_string(), status.clone());
+        }
+
+        log::info!("[start_port_forwarding] Port forwarding started successfully for server: {}", server_id);
+        Ok(status)
+    }
+
+    /// 停止 SSH 端口转发
+    pub async fn stop_port_forwarding(&self, server_id: &str) -> Result<(), SshError> {
+        log::info!("[stop_port_forwarding] Stopping port forwarding for server: {}", server_id);
+
+        // 获取并终止进程
+        let mut child = {
+            let mut forwards = self.port_forwards.write().await;
+            forwards.remove(server_id)
+        };
+
+        if let Some(ref mut child) = child {
+            // 尝试优雅终止
+            let _ = child.kill();
+            let _ = child.wait();
+            log::info!("[stop_port_forwarding] SSH process killed for server: {}", server_id);
+        }
+
+        // 清除状态
+        {
+            let mut pf_status = self.port_forward_status.write().await;
+            pf_status.remove(server_id);
+        }
+
+        Ok(())
+    }
+
+    /// 获取端口转发状态
+    pub async fn get_port_forwarding_status(&self, server_id: &str) -> Option<PortForwardingStatus> {
+        // 首先检查进程是否仍在运行
+        let is_running = {
+            let mut forwards = self.port_forwards.write().await;
+            if let Some(child) = forwards.get_mut(server_id) {
+                match child.try_wait() {
+                    Ok(Some(_)) => {
+                        // 进程已退出
+                        false
+                    }
+                    Ok(None) => {
+                        // 进程仍在运行
+                        true
+                    }
+                    Err(_) => false,
+                }
+            } else {
+                false
+            }
+        };
+
+        if !is_running {
+            // 清理已退出的进程状态
+            {
+                let mut forwards = self.port_forwards.write().await;
+                forwards.remove(server_id);
+            }
+            {
+                let mut pf_status = self.port_forward_status.write().await;
+                pf_status.remove(server_id);
+            }
+            return None;
+        }
+
+        let status = self.port_forward_status.read().await;
+        status.get(server_id).cloned()
+    }
+
+    /// 构建 SSH 命令参数
+    fn build_ssh_args(
+        &self,
+        config: &SshConfig,
+        local_address: &str,
+        remote_port: u16,
+    ) -> Result<Vec<String>, SshError> {
+        let mut args = Vec::new();
+
+        // -N: 不执行远程命令
+        args.push("-N".to_string());
+
+        // -o: SSH 选项
+        args.push("-o".to_string());
+        args.push("StrictHostKeyChecking=no".to_string());
+        args.push("-o".to_string());
+        args.push("UserKnownHostsFile=/dev/null".to_string());
+        args.push("-o".to_string());
+        args.push("ServerAliveInterval=30".to_string());
+        args.push("-o".to_string());
+        args.push("ServerAliveCountMax=3".to_string());
+        args.push("-o".to_string());
+        args.push("ExitOnForwardFailure=yes".to_string());
+
+        // -R: 远程端口转发
+        // 格式: remote_port:local_host:local_port
+        // 让远程服务器监听 remote_port，转发到本地的 local_address
+        args.push("-R".to_string());
+        args.push(format!("{}:{}", remote_port, local_address));
+
+        // 私钥认证
+        if let SshAuthType::Key = config.auth_type {
+            if let Some(key_path) = &config.private_key_path {
+                // 展开 ~
+                let expanded_path = if key_path.starts_with("~/") {
+                    if let Some(home) = dirs::home_dir() {
+                        home.join(&key_path[2..]).to_string_lossy().to_string()
+                    } else {
+                        key_path.clone()
+                    }
+                } else {
+                    key_path.clone()
+                };
+                args.push("-i".to_string());
+                args.push(expanded_path);
+            }
+        }
+
+        // 端口
+        args.push("-p".to_string());
+        args.push(config.port.to_string());
+
+        // 用户名@主机
+        args.push(format!("{}@{}", config.username, config.host));
+
+        Ok(args)
     }
 }
 

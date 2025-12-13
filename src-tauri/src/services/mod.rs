@@ -18,7 +18,7 @@ pub use provider::{ProviderService, ProviderSortUpdate};
 pub use proxy::ProxyService;
 pub use skill::{Skill, SkillRepo, SkillService};
 pub use speedtest::{EndpointLatency, SpeedtestService};
-pub use ssh::{ConnectionStatus, RemoteConfig, SshConfig, SshError, SshService};
+pub use ssh::{ConnectionStatus, PortForwardingStatus, RemoteConfig, SshConfig, SshError, SshService};
 #[allow(unused_imports)]
 pub use usage_stats::{
     DailyStats, LogFilters, ModelStats, PaginatedLogs, ProviderLimitStatus, ProviderStats,

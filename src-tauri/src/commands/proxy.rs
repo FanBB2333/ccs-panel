@@ -21,6 +21,25 @@ pub async fn stop_proxy_with_restore(state: tauri::State<'_, AppState>) -> Resul
     state.proxy_service.stop_with_restore().await
 }
 
+/// 启动代理服务器（带远程服务器支持）
+///
+/// 如果提供了server_id，会为远程服务器启动SSH端口转发
+#[tauri::command]
+pub async fn start_proxy_with_takeover_for_server(
+    state: tauri::State<'_, AppState>,
+    server_id: Option<String>,
+) -> Result<ProxyServerInfo, String> {
+    state.proxy_service.start_with_takeover_for_server(server_id).await
+}
+
+/// 停止代理服务器（带远程服务器支持）
+#[tauri::command]
+pub async fn stop_proxy_with_restore_for_server(
+    state: tauri::State<'_, AppState>,
+) -> Result<(), String> {
+    state.proxy_service.stop_with_restore_for_server().await
+}
+
 /// 获取代理服务器状态
 #[tauri::command]
 pub async fn get_proxy_status(state: tauri::State<'_, AppState>) -> Result<ProxyStatus, String> {

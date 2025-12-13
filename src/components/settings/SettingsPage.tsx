@@ -43,6 +43,7 @@ import type { SettingsFormState } from "@/hooks/useSettings";
 import { Switch } from "@/components/ui/switch";
 import { Badge } from "@/components/ui/badge";
 import { useProxyStatus } from "@/hooks/useProxyStatus";
+import { useServer } from "@/contexts/ServerContext";
 
 interface SettingsDialogProps {
   open: boolean;
@@ -56,6 +57,7 @@ export function SettingsPage({
   onImportSuccess,
 }: SettingsDialogProps) {
   const { t } = useTranslation();
+  const { currentServer } = useServer();
   const {
     settings,
     isLoading,
@@ -276,6 +278,8 @@ export function SettingsPage({
                       </AccordionContent>
                     </AccordionItem>
 
+                    {/* 本地代理仅对远程服务器显示 */}
+                    {currentServer && !currentServer.isLocal && (
                     <AccordionItem
                       value="proxy"
                       className="rounded-xl glass-card overflow-hidden"
@@ -318,6 +322,7 @@ export function SettingsPage({
                         <ProxyPanel />
                       </AccordionContent>
                     </AccordionItem>
+                    )}
 
                     <AccordionItem
                       value="test"

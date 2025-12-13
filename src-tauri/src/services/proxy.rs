@@ -7,6 +7,7 @@ use crate::config::{get_claude_settings_path, read_json_file, write_json_file};
 use crate::database::Database;
 use crate::proxy::server::ProxyServer;
 use crate::proxy::types::*;
+use crate::services::ssh::SshService;
 use serde_json::{json, Value};
 use std::str::FromStr;
 use std::sync::Arc;
@@ -16,6 +17,11 @@ use tokio::sync::RwLock;
 pub struct ProxyService {
     db: Arc<Database>,
     server: Arc<RwLock<Option<ProxyServer>>>,
+    ssh_service: Option<Arc<SshService>>,
+    /// 当前代理服务的服务器ID（None表示本地，Some表示远程）
+    current_server_id: Arc<RwLock<Option<String>>>,
+    /// SSH端口转发的本地端口（动态分配）
+    ssh_forward_port: Arc<RwLock<Option<u16>>>,
 }
 
 impl ProxyService {
@@ -23,7 +29,30 @@ impl ProxyService {
         Self {
             db,
             server: Arc::new(RwLock::new(None)),
+            ssh_service: None,
+            current_server_id: Arc::new(RwLock::new(None)),
+            ssh_forward_port: Arc::new(RwLock::new(None)),
         }
+    }
+
+    /// 设置SSH服务引用（用于远程服务器代理）
+    pub fn with_ssh_service(mut self, ssh_service: Arc<SshService>) -> Self {
+        self.ssh_service = Some(ssh_service);
+        self
+    }
+
+    /// 查找一个可用的本地端口
+    async fn find_available_port() -> Result<u16, String> {
+        use std::net::TcpListener;
+
+        // 尝试绑定端口0，系统会自动分配一个可用端口
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .map_err(|e| format!("无法分配端口: {}", e))?;
+        let port = listener.local_addr()
+            .map_err(|e| format!("无法获取分配的端口: {}", e))?
+            .port();
+        drop(listener);
+        Ok(port)
     }
 
     /// 启动代理服务器
@@ -94,6 +123,243 @@ impl ProxyService {
                 Err(e)
             }
         }
+    }
+
+    /// 启动代理服务器（带远程服务器支持）
+    ///
+    /// 如果提供了server_id，会为远程服务器启动SSH端口转发
+    pub async fn start_with_takeover_for_server(
+        &self,
+        server_id: Option<String>,
+    ) -> Result<ProxyServerInfo, String> {
+        // 保存当前服务器ID
+        {
+            let mut current_id = self.current_server_id.write().await;
+            *current_id = server_id.clone();
+        }
+
+        // 如果是远程服务器，需要SSH服务支持
+        if let Some(ref sid) = server_id {
+            let ssh_service = self.ssh_service.as_ref()
+                .ok_or_else(|| "远程服务器代理需要SSH服务支持".to_string())?;
+
+            // 1. 启动本地代理服务器
+            log::info!("[ProxyService] 为远程服务器 {} 启动本地代理", sid);
+            let proxy_info = self.start_with_takeover().await?;
+
+            // 2. 分配一个可用端口用于SSH转发
+            let forward_port = Self::find_available_port().await?;
+            log::info!("[ProxyService] 分配SSH转发端口: {}", forward_port);
+
+            // 3. 启动SSH远程端口转发
+            // 将本地代理端口转发到远程服务器
+            let local_address = format!("{}:{}", proxy_info.address, proxy_info.port);
+            log::info!("[ProxyService] 启动SSH端口转发: {} -> 远程:{}", local_address, forward_port);
+
+            match ssh_service.start_port_forwarding(sid, &local_address, forward_port).await {
+                Ok(status) => {
+                    log::info!("[ProxyService] SSH端口转发已启动: {:?}", status);
+
+                    // 保存转发端口
+                    {
+                        let mut port = self.ssh_forward_port.write().await;
+                        *port = Some(forward_port);
+                    }
+
+                    // 4. 修改远程配置文件，指向转发的端口
+                    if let Err(e) = self.update_remote_configs_for_proxy(sid, forward_port).await {
+                        log::error!("[ProxyService] 更新远程配置失败: {}", e);
+                        // 清理已启动的服务
+                        let _ = ssh_service.stop_port_forwarding(sid).await;
+                        let _ = self.stop().await;
+                        return Err(format!("更新远程配置失败: {}", e));
+                    }
+
+                    Ok(proxy_info)
+                }
+                Err(e) => {
+                    log::error!("[ProxyService] SSH端口转发启动失败: {}", e);
+                    // 清理已启动的代理服务
+                    let _ = self.stop().await;
+                    Err(format!("SSH端口转发启动失败: {}", e))
+                }
+            }
+        } else {
+            // 本地服务器，直接启动代理
+            self.start_with_takeover().await
+        }
+    }
+
+    /// 停止代理服务器（带远程服务器支持）
+    pub async fn stop_with_restore_for_server(&self) -> Result<(), String> {
+        // 获取当前服务器ID
+        let server_id = {
+            let current_id = self.current_server_id.read().await;
+            current_id.clone()
+        };
+
+        if let Some(ref sid) = server_id {
+            let ssh_service = self.ssh_service.as_ref()
+                .ok_or_else(|| "远程服务器代理需要SSH服务支持".to_string())?;
+
+            log::info!("[ProxyService] 停止远程服务器 {} 的代理", sid);
+
+            // 1. 恢复远程配置文件
+            if let Err(e) = self.restore_remote_configs(sid).await {
+                log::warn!("[ProxyService] 恢复远程配置失败: {}", e);
+            }
+
+            // 2. 停止SSH端口转发
+            if let Err(e) = ssh_service.stop_port_forwarding(sid).await {
+                log::warn!("[ProxyService] 停止SSH端口转发失败: {}", e);
+            }
+
+            // 清除转发端口记录
+            {
+                let mut port = self.ssh_forward_port.write().await;
+                *port = None;
+            }
+
+            // 3. 停止本地代理服务
+            self.stop_with_restore().await?;
+
+            // 清除服务器ID
+            {
+                let mut current_id = self.current_server_id.write().await;
+                *current_id = None;
+            }
+
+            Ok(())
+        } else {
+            // 本地服务器，直接停止
+            self.stop_with_restore().await
+        }
+    }
+
+    /// 更新远程服务器的配置文件，指向SSH转发的端口
+    async fn update_remote_configs_for_proxy(
+        &self,
+        server_id: &str,
+        forward_port: u16,
+    ) -> Result<(), String> {
+        let ssh_service = self.ssh_service.as_ref()
+            .ok_or_else(|| "SSH服务未初始化".to_string())?;
+
+        log::info!("[ProxyService] 更新远程配置文件，指向127.0.0.1:{}", forward_port);
+
+        let proxy_url = format!("http://127.0.0.1:{}", forward_port);
+        let app_types = ["claude", "codex", "gemini"];
+
+        for app_type in app_types {
+            let update_script = match app_type {
+                "claude" => {
+                    // 更新 ~/.claude/settings.json
+                    format!(r#"
+                        mkdir -p ~/.claude
+                        SETTINGS=~/.claude/settings.json
+                        if [ -f "$SETTINGS" ]; then
+                            # 备份原始文件（如果还没有备份）
+                            [ ! -f "$SETTINGS.proxy_backup" ] && cp "$SETTINGS" "$SETTINGS.proxy_backup"
+                            # 使用jq更新ANTHROPIC_BASE_URL
+                            if command -v jq >/dev/null 2>&1; then
+                                jq '.env.ANTHROPIC_BASE_URL = "{}"' "$SETTINGS" > "$SETTINGS.tmp" && mv "$SETTINGS.tmp" "$SETTINGS"
+                            else
+                                # 如果没有jq，使用sed（不太安全但是fallback方案）
+                                echo '{{\"env\":{{\"ANTHROPIC_BASE_URL\":\"{}\"}}}}' > "$SETTINGS"
+                            fi
+                        fi
+                    "#, proxy_url, proxy_url)
+                }
+                "codex" => {
+                    // 更新 ~/.codex/auth.json
+                    format!(r#"
+                        mkdir -p ~/.codex
+                        AUTH=~/.codex/auth.json
+                        if [ -f "$AUTH" ]; then
+                            [ ! -f "$AUTH.proxy_backup" ] && cp "$AUTH" "$AUTH.proxy_backup"
+                            if command -v jq >/dev/null 2>&1; then
+                                jq '.OPENAI_BASE_URL = "{}"' "$AUTH" > "$AUTH.tmp" && mv "$AUTH.tmp" "$AUTH"
+                            fi
+                        fi
+                    "#, proxy_url)
+                }
+                "gemini" => {
+                    // 更新 ~/.gemini/.env
+                    format!(r#"
+                        mkdir -p ~/.gemini
+                        ENV=~/.gemini/.env
+                        if [ -f "$ENV" ]; then
+                            [ ! -f "$ENV.proxy_backup" ] && cp "$ENV" "$ENV.proxy_backup"
+                            if grep -q "GEMINI_API_BASE=" "$ENV"; then
+                                sed -i.bak 's|GEMINI_API_BASE=.*|GEMINI_API_BASE={}|' "$ENV"
+                            else
+                                echo "GEMINI_API_BASE={}" >> "$ENV"
+                            fi
+                        fi
+                    "#, proxy_url, proxy_url)
+                }
+                _ => continue,
+            };
+
+            if let Err(e) = ssh_service.execute(server_id, &update_script).await {
+                log::warn!("[ProxyService] 更新 {} 远程配置失败: {}", app_type, e);
+            } else {
+                log::info!("[ProxyService] 已更新 {} 远程配置", app_type);
+            }
+        }
+
+        Ok(())
+    }
+
+    /// 恢复远程服务器的配置文件
+    async fn restore_remote_configs(&self, server_id: &str) -> Result<(), String> {
+        let ssh_service = self.ssh_service.as_ref()
+            .ok_or_else(|| "SSH服务未初始化".to_string())?;
+
+        log::info!("[ProxyService] 恢复远程配置文件");
+
+        let app_types = ["claude", "codex", "gemini"];
+
+        for app_type in app_types {
+            let restore_script = match app_type {
+                "claude" => {
+                    r#"
+                        SETTINGS=~/.claude/settings.json
+                        if [ -f "$SETTINGS.proxy_backup" ]; then
+                            mv "$SETTINGS.proxy_backup" "$SETTINGS"
+                            echo "restored"
+                        fi
+                    "#.to_string()
+                }
+                "codex" => {
+                    r#"
+                        AUTH=~/.codex/auth.json
+                        if [ -f "$AUTH.proxy_backup" ]; then
+                            mv "$AUTH.proxy_backup" "$AUTH"
+                            echo "restored"
+                        fi
+                    "#.to_string()
+                }
+                "gemini" => {
+                    r#"
+                        ENV=~/.gemini/.env
+                        if [ -f "$ENV.proxy_backup" ]; then
+                            mv "$ENV.proxy_backup" "$ENV"
+                            echo "restored"
+                        fi
+                    "#.to_string()
+                }
+                _ => continue,
+            };
+
+            if let Err(e) = ssh_service.execute(server_id, &restore_script).await {
+                log::warn!("[ProxyService] 恢复 {} 远程配置失败: {}", app_type, e);
+            } else {
+                log::info!("[ProxyService] 已恢复 {} 远程配置", app_type);
+            }
+        }
+
+        Ok(())
     }
 
     /// 自动设置代理目标：将各应用当前选中的供应商设置为代理目标

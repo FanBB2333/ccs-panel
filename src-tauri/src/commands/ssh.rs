@@ -1,6 +1,6 @@
 //! SSH 相关的 Tauri 命令
 
-use crate::services::ssh::{ConnectionStatus, RemoteConfig, SshConfig, SshError};
+use crate::services::ssh::{ConnectionStatus, PortForwardingStatus, RemoteConfig, SshConfig, SshError};
 use crate::store::AppState;
 use serde::{Deserialize, Serialize};
 use tauri::State;
@@ -179,4 +179,44 @@ pub async fn ssh_switch_remote_provider(
         .set_remote_current_provider(&server_id, &provider_id, &app_type)
         .await
         .map_err(ssh_error_to_string)
+}
+
+/// 启动 SSH 端口转发
+#[tauri::command]
+pub async fn ssh_start_port_forwarding(
+    state: State<'_, AppState>,
+    server_id: String,
+    local_address: String,
+    remote_port: u16,
+) -> Result<PortForwardingStatus, String> {
+    state
+        .ssh_service
+        .start_port_forwarding(&server_id, &local_address, remote_port)
+        .await
+        .map_err(ssh_error_to_string)
+}
+
+/// 停止 SSH 端口转发
+#[tauri::command]
+pub async fn ssh_stop_port_forwarding(
+    state: State<'_, AppState>,
+    server_id: String,
+) -> Result<(), String> {
+    state
+        .ssh_service
+        .stop_port_forwarding(&server_id)
+        .await
+        .map_err(ssh_error_to_string)
+}
+
+/// 获取 SSH 端口转发状态
+#[tauri::command]
+pub async fn ssh_get_port_forwarding_status(
+    state: State<'_, AppState>,
+    server_id: String,
+) -> Result<Option<PortForwardingStatus>, String> {
+    Ok(state
+        .ssh_service
+        .get_port_forwarding_status(&server_id)
+        .await)
 }

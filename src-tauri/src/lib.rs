@@ -674,6 +674,8 @@ pub fn run() {
             // Proxy server management
             commands::start_proxy_with_takeover,
             commands::stop_proxy_with_restore,
+            commands::start_proxy_with_takeover_for_server,
+            commands::stop_proxy_with_restore_for_server,
             commands::get_proxy_status,
             commands::get_proxy_config,
             commands::update_proxy_config,

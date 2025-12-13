@@ -556,7 +556,8 @@ function App() {
             )}
             {currentView === "providers" && !isOnServerHome && (
               <>
-                <ProxyToggle />
+                {/* Proxy 功能仅对远程服务器显示 */}
+                {currentServer && !currentServer.isLocal && <ProxyToggle />}
 
                 <AppSwitcher activeApp={activeApp} onSwitch={setActiveApp} />
 
