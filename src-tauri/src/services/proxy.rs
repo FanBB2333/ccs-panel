@@ -128,6 +128,12 @@ impl ProxyService {
     /// 启动代理服务器（带远程服务器支持）
     ///
     /// 如果提供了server_id，会为远程服务器启动SSH端口转发
+    ///
+    /// 简化版实现：
+    /// 1. 获取当前选中的 Provider 的 ANTHROPIC_BASE_URL
+    /// 2. 解析 URL 获取 host:port
+    /// 3. 直接执行 ssh -R remote_port:api_host:api_port 转发
+    /// 4. 修改远程配置文件指向 127.0.0.1:remote_port
     pub async fn start_with_takeover_for_server(
         &self,
         server_id: Option<String>,
@@ -143,50 +149,192 @@ impl ProxyService {
             let ssh_service = self.ssh_service.as_ref()
                 .ok_or_else(|| "远程服务器代理需要SSH服务支持".to_string())?;
 
-            // 1. 启动本地代理服务器
-            log::info!("[ProxyService] 为远程服务器 {} 启动本地代理", sid);
-            let proxy_info = self.start_with_takeover().await?;
+            log::info!("[ProxyService] 为远程服务器 {} 启动 SSH 转发代理", sid);
 
-            // 2. 分配一个可用端口用于SSH转发
-            let forward_port = Self::find_available_port().await?;
-            log::info!("[ProxyService] 分配SSH转发端口: {}", forward_port);
+            // 1. 获取当前选中的 Claude Provider
+            let provider_id = self.db.get_current_provider("claude")
+                .ok()
+                .flatten()
+                .ok_or_else(|| "未选中 Claude Provider".to_string())?;
 
-            // 3. 启动SSH远程端口转发
-            // 将本地代理端口转发到远程服务器
-            let local_address = format!("{}:{}", proxy_info.address, proxy_info.port);
-            log::info!("[ProxyService] 启动SSH端口转发: {} -> 远程:{}", local_address, forward_port);
+            let provider = self.db.get_provider_by_id(&provider_id, "claude")
+                .map_err(|e| format!("获取 Provider 失败: {}", e))?
+                .ok_or_else(|| "Provider 不存在".to_string())?;
 
-            match ssh_service.start_port_forwarding(sid, &local_address, forward_port).await {
+            // 2. 从 Provider 中提取 ANTHROPIC_BASE_URL
+            let base_url = self.extract_base_url_from_provider(&provider)?;
+            log::info!("[ProxyService] 提取到 ANTHROPIC_BASE_URL: {}", base_url);
+
+            // 3. 解析 URL 获取 host:port
+            let target_address = self.parse_url_to_host_port(&base_url)?;
+            log::info!("[ProxyService] 解析目标地址: {}", target_address);
+
+            // 4. 分配一个可用端口用于远程监听
+            let remote_port = Self::find_available_port().await?;
+            log::info!("[ProxyService] 分配远程转发端口: {}", remote_port);
+
+            // 5. 启动 SSH 远程端口转发
+            // ssh -R remote_port:api_host:api_port
+            log::info!("[ProxyService] 启动 SSH 转发: 远程:{} -> {}", remote_port, target_address);
+
+            match ssh_service.start_remote_port_forwarding_to_target(sid, remote_port, &target_address).await {
                 Ok(status) => {
                     log::info!("[ProxyService] SSH端口转发已启动: {:?}", status);
 
                     // 保存转发端口
                     {
                         let mut port = self.ssh_forward_port.write().await;
-                        *port = Some(forward_port);
+                        *port = Some(remote_port);
                     }
 
-                    // 4. 修改远程配置文件，指向转发的端口
-                    if let Err(e) = self.update_remote_configs_for_proxy(sid, forward_port).await {
+                    // 设置接管状态
+                    self.db
+                        .set_live_takeover_active(true)
+                        .await
+                        .map_err(|e| format!("设置接管状态失败: {e}"))?;
+
+                    // 6. 修改远程配置文件，指向转发的端口
+                    // 根据原始 URL 的协议决定使用 http 还是 https
+                    let is_https = base_url.starts_with("https://");
+                    if let Err(e) = self.update_remote_configs_for_direct_proxy(sid, remote_port, is_https).await {
                         log::error!("[ProxyService] 更新远程配置失败: {}", e);
                         // 清理已启动的服务
                         let _ = ssh_service.stop_port_forwarding(sid).await;
-                        let _ = self.stop().await;
+                        let _ = self.db.set_live_takeover_active(false).await;
                         return Err(format!("更新远程配置失败: {}", e));
                     }
 
-                    Ok(proxy_info)
+                    Ok(ProxyServerInfo {
+                        address: "127.0.0.1".to_string(),
+                        port: remote_port,
+                        started_at: chrono::Utc::now().to_rfc3339(),
+                    })
                 }
                 Err(e) => {
                     log::error!("[ProxyService] SSH端口转发启动失败: {}", e);
-                    // 清理已启动的代理服务
-                    let _ = self.stop().await;
                     Err(format!("SSH端口转发启动失败: {}", e))
                 }
             }
         } else {
             // 本地服务器，直接启动代理
             self.start_with_takeover().await
+        }
+    }
+
+    /// 从 Provider 配置中提取 ANTHROPIC_BASE_URL
+    fn extract_base_url_from_provider(&self, provider: &crate::provider::Provider) -> Result<String, String> {
+        // 1. 从 env 中获取
+        if let Some(env) = provider.settings_config.get("env") {
+            if let Some(url) = env.get("ANTHROPIC_BASE_URL").and_then(|v| v.as_str()) {
+                if !url.is_empty() {
+                    return Ok(url.trim_end_matches('/').to_string());
+                }
+            }
+        }
+
+        // 2. 尝试直接获取 base_url
+        if let Some(url) = provider.settings_config.get("base_url").and_then(|v| v.as_str()) {
+            if !url.is_empty() {
+                return Ok(url.trim_end_matches('/').to_string());
+            }
+        }
+
+        // 3. 尝试 baseURL
+        if let Some(url) = provider.settings_config.get("baseURL").and_then(|v| v.as_str()) {
+            if !url.is_empty() {
+                return Ok(url.trim_end_matches('/').to_string());
+            }
+        }
+
+        // 4. 默认使用官方 API
+        Ok("https://api.anthropic.com".to_string())
+    }
+
+    /// 解析 URL 为 host:port 格式
+    fn parse_url_to_host_port(&self, url: &str) -> Result<String, String> {
+        use url::Url;
+
+        let parsed = Url::parse(url)
+            .map_err(|e| format!("无效的 URL: {}", e))?;
+
+        let host = parsed.host_str()
+            .ok_or_else(|| "URL 缺少主机名".to_string())?;
+
+        let port = parsed.port().unwrap_or_else(|| {
+            match parsed.scheme() {
+                "https" => 443,
+                "http" => 80,
+                _ => 443,
+            }
+        });
+
+        Ok(format!("{}:{}", host, port))
+    }
+
+    /// 更新远程服务器的配置文件（直接转发模式）
+    ///
+    /// 将 ANTHROPIC_BASE_URL 修改为指向 SSH 隧道端口
+    async fn update_remote_configs_for_direct_proxy(
+        &self,
+        server_id: &str,
+        forward_port: u16,
+        _is_https: bool,
+    ) -> Result<(), String> {
+        let ssh_service = self.ssh_service.as_ref()
+            .ok_or_else(|| "SSH服务未初始化".to_string())?;
+
+        // 注意：SSH -R 转发的是 TCP 连接，远程访问时使用 http://127.0.0.1:port
+        // 即使目标是 HTTPS，通过隧道后在远程端仍然是明文 HTTP
+        // 因为 TLS 握手发生在隧道的另一端（目标服务器）
+        let proxy_url = format!("http://127.0.0.1:{}", forward_port);
+
+        log::info!("[ProxyService] 更新远程配置文件，指向 {}", proxy_url);
+
+        // 只更新 Claude 配置
+        let update_script = format!(r#"
+            mkdir -p ~/.claude
+            SETTINGS=~/.claude/settings.json
+            if [ -f "$SETTINGS" ]; then
+                # 备份原始文件（如果还没有备份）
+                [ ! -f "$SETTINGS.proxy_backup" ] && cp "$SETTINGS" "$SETTINGS.proxy_backup"
+                # 使用jq更新ANTHROPIC_BASE_URL
+                if command -v jq >/dev/null 2>&1; then
+                    jq '.env.ANTHROPIC_BASE_URL = "{}"' "$SETTINGS" > "$SETTINGS.tmp" && mv "$SETTINGS.tmp" "$SETTINGS"
+                    echo "updated_with_jq"
+                else
+                    # 如果没有jq，使用Python
+                    if command -v python3 >/dev/null 2>&1; then
+                        python3 -c "
+import json
+with open('$SETTINGS', 'r') as f:
+    data = json.load(f)
+if 'env' not in data:
+    data['env'] = {{}}
+data['env']['ANTHROPIC_BASE_URL'] = '{}'
+with open('$SETTINGS', 'w') as f:
+    json.dump(data, f, indent=2)
+print('updated_with_python')
+"
+                    else
+                        echo "no_json_tool"
+                    fi
+                fi
+            else
+                # 创建新配置文件
+                echo '{{"env":{{"ANTHROPIC_BASE_URL":"{}"}}}}' > "$SETTINGS"
+                echo "created_new"
+            fi
+        "#, proxy_url, proxy_url, proxy_url);
+
+        match ssh_service.execute(server_id, &update_script).await {
+            Ok(result) => {
+                log::info!("[ProxyService] 更新远程 Claude 配置结果: {}", result.trim());
+                Ok(())
+            }
+            Err(e) => {
+                log::error!("[ProxyService] 更新远程 Claude 配置失败: {}", e);
+                Err(format!("更新远程配置失败: {}", e))
+            }
         }
     }
 
@@ -220,8 +368,11 @@ impl ProxyService {
                 *port = None;
             }
 
-            // 3. 停止本地代理服务
-            self.stop_with_restore().await?;
+            // 3. 清除接管状态（远程模式不需要停止本地代理服务）
+            self.db
+                .set_live_takeover_active(false)
+                .await
+                .map_err(|e| format!("清除接管状态失败: {e}"))?;
 
             // 清除服务器ID
             {
@@ -229,6 +380,7 @@ impl ProxyService {
                 *current_id = None;
             }
 
+            log::info!("[ProxyService] 远程代理已停止，配置已恢复");
             Ok(())
         } else {
             // 本地服务器，直接停止

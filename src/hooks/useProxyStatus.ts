@@ -9,10 +9,22 @@ import { useTranslation } from "react-i18next";
 import type { ProxyStatus, ProxyServerInfo } from "@/types/proxy";
 import { extractErrorMessage } from "@/utils/errorUtils";
 
+interface UseProxyStatusOptions {
+  /**
+   * 服务器 ID，null 或 "local" 表示本地服务器，其他值表示远程服务器
+   */
+  serverId?: string | null;
+}
+
 /**
  * 代理服务状态管理
+ * @param options.serverId - 服务器 ID，用于区分本地模式和远程服务器模式
  */
-export function useProxyStatus() {
+export function useProxyStatus(options: UseProxyStatusOptions = {}) {
+  const { serverId } = options;
+  // 判断是否为远程服务器（serverId 存在且不为 "local"）
+  const isRemoteServer = serverId != null && serverId !== "local";
+
   const queryClient = useQueryClient();
   const { t } = useTranslation();
 
@@ -33,12 +45,24 @@ export function useProxyStatus() {
   });
 
   // 启动服务器（带 Live 配置接管）
+  // 根据是否为远程服务器调用不同的后端命令
   const startWithTakeoverMutation = useMutation({
-    mutationFn: () => invoke<ProxyServerInfo>("start_proxy_with_takeover"),
+    mutationFn: () => {
+      if (isRemoteServer) {
+        // 远程服务器模式：启动本地代理 + SSH 端口转发 + 修改远程配置
+        return invoke<ProxyServerInfo>("start_proxy_with_takeover_for_server", {
+          server_id: serverId,
+        });
+      } else {
+        // 本地模式
+        return invoke<ProxyServerInfo>("start_proxy_with_takeover");
+      }
+    },
     onSuccess: (info) => {
+      const modeText = isRemoteServer ? "远程" : "本地";
       toast.success(
         t("proxy.startedWithTakeover", {
-          defaultValue: `代理模式已启用 - ${info.address}:${info.port}`,
+          defaultValue: `${modeText}代理模式已启用 - ${info.address}:${info.port}`,
         }),
       );
       queryClient.invalidateQueries({ queryKey: ["proxyStatus"] });
@@ -55,8 +79,17 @@ export function useProxyStatus() {
   });
 
   // 停止服务器（恢复 Live 配置）
+  // 根据是否为远程服务器调用不同的后端命令
   const stopWithRestoreMutation = useMutation({
-    mutationFn: () => invoke("stop_proxy_with_restore"),
+    mutationFn: () => {
+      if (isRemoteServer) {
+        // 远程服务器模式：恢复远程配置 + 停止 SSH 端口转发 + 停止本地代理
+        return invoke("stop_proxy_with_restore_for_server");
+      } else {
+        // 本地模式
+        return invoke("stop_proxy_with_restore");
+      }
+    },
     onSuccess: () => {
       toast.success(
         t("proxy.stoppedWithRestore", {
@@ -117,6 +150,7 @@ export function useProxyStatus() {
     isLoading,
     isRunning: status?.running || false,
     isTakeoverActive: isTakeoverActive || false,
+    isRemoteServer,
 
     // 启动/停止（接管模式）
     startWithTakeover: startWithTakeoverMutation.mutateAsync,
