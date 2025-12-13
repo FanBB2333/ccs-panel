@@ -31,6 +31,9 @@ mod schema;
 #[cfg(test)]
 mod tests;
 
+// Re-export ProviderStore trait for use by other modules (e.g., services/provider)
+pub use dao::{LocalProviderStore, ProviderStore};
+
 use crate::config::get_app_config_dir;
 use crate::error::AppError;
 use rusqlite::Connection;

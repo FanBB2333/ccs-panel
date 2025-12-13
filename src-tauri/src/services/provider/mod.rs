@@ -15,6 +15,7 @@ use serde_json::Value;
 use crate::app_config::AppType;
 use crate::error::AppError;
 use crate::provider::{Provider, UsageResult};
+use crate::database::ProviderStore;
 use crate::services::mcp::McpService;
 use crate::settings::CustomEndpoint;
 use crate::store::AppState;
@@ -399,6 +400,116 @@ impl ProviderService {
     pub(crate) fn write_gemini_live(provider: &Provider) -> Result<(), AppError> {
         write_gemini_live(provider)
     }
+
+    // ==================== Store-based methods ====================
+    // These methods accept a ProviderStore trait object, allowing them to work
+    // with both local (Database) and remote (SSH) storage backends.
+
+    /// Add a new provider using a store backend
+    ///
+    /// This method is used for both local and remote provider management.
+    /// It validates the provider settings and saves to the provided store.
+    pub fn add_with_store(
+        store: &dyn ProviderStore,
+        app_type: AppType,
+        provider: Provider,
+    ) -> Result<bool, AppError> {
+        let mut provider = provider;
+        // Normalize Claude model keys
+        Self::normalize_provider_if_claude(&app_type, &mut provider);
+        Self::validate_provider_settings(&app_type, &provider)?;
+
+        // Save to store
+        store.save_provider(app_type.as_str(), &provider)?;
+
+        // Check if sync is needed (if no current provider exists)
+        let current = store.get_current_provider(app_type.as_str())?;
+        if current.is_none() {
+            // No current provider, set as current and write live config
+            store.set_current_provider(app_type.as_str(), &provider.id)?;
+            store.write_live_config(app_type.as_str(), &provider.settings_config)?;
+        }
+
+        Ok(true)
+    }
+
+    /// Update a provider using a store backend
+    ///
+    /// This method is used for both local and remote provider management.
+    pub fn update_with_store(
+        store: &dyn ProviderStore,
+        app_type: AppType,
+        provider: Provider,
+    ) -> Result<bool, AppError> {
+        let mut provider = provider;
+        // Normalize Claude model keys
+        Self::normalize_provider_if_claude(&app_type, &mut provider);
+        Self::validate_provider_settings(&app_type, &provider)?;
+
+        // Check if this is current provider
+        let current = store.get_current_provider(app_type.as_str())?;
+        let is_current = current.as_deref() == Some(provider.id.as_str());
+
+        // Save to store
+        store.save_provider(app_type.as_str(), &provider)?;
+
+        // If this is current provider, update live config
+        if is_current {
+            store.write_live_config(app_type.as_str(), &provider.settings_config)?;
+        }
+
+        Ok(true)
+    }
+
+    /// Delete a provider using a store backend
+    ///
+    /// This method prevents deletion of the current provider.
+    pub fn delete_with_store(
+        store: &dyn ProviderStore,
+        app_type: AppType,
+        id: &str,
+    ) -> Result<(), AppError> {
+        // Check if this is current provider
+        let current = store.get_current_provider(app_type.as_str())?;
+        if current.as_deref() == Some(id) {
+            return Err(AppError::Message(
+                "无法删除当前正在使用的供应商".to_string(),
+            ));
+        }
+
+        store.delete_provider(app_type.as_str(), id)
+    }
+
+    /// Switch to a provider using a store backend
+    ///
+    /// This is a simplified switch that:
+    /// 1. Validates the target provider exists
+    /// 2. Updates the current provider in the store
+    /// 3. Writes the provider's settings to live config
+    ///
+    /// Note: This does NOT handle proxy takeover mode or MCP sync,
+    /// as those are local-only concerns. The caller should handle them separately.
+    pub fn switch_with_store(
+        store: &dyn ProviderStore,
+        app_type: AppType,
+        id: &str,
+    ) -> Result<(), AppError> {
+        // Get all providers to verify the target exists
+        let providers = store.get_all_providers(app_type.as_str())?;
+        let provider = providers
+            .get(id)
+            .ok_or_else(|| AppError::Message(format!("供应商 {id} 不存在")))?;
+
+        // Update current provider in store
+        store.set_current_provider(app_type.as_str(), id)?;
+
+        // Write settings to live config
+        store.write_live_config(app_type.as_str(), &provider.settings_config)?;
+
+        Ok(())
+    }
+
+    // ==================== Validation methods ====================
 
     fn validate_provider_settings(app_type: &AppType, provider: &Provider) -> Result<(), AppError> {
         match app_type {

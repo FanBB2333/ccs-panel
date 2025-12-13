@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::process::Child;
+use std::str::FromStr;
 use std::sync::Arc;
 use thiserror::Error;
 use tokio::sync::RwLock;
@@ -113,6 +114,22 @@ impl SshService {
             configs: Arc::new(RwLock::new(HashMap::new())),
             port_forwards: Arc::new(RwLock::new(HashMap::new())),
             port_forward_status: Arc::new(RwLock::new(HashMap::new())),
+        }
+    }
+
+    /// 为 shell 命令正确引用路径
+    ///
+    /// 关键点：`~` 只有在单词开头且不在引号内时才会被 shell 展开。
+    /// - `"~/path"` → ~ 不会展开（错误）
+    /// - `~/path` → ~ 会展开，但路径有空格时会出问题
+    /// - `~/"path with spaces"` → ~ 会展开且空格被正确处理（正确）
+    fn quote_path_for_shell(path: &str) -> String {
+        if path.starts_with("~/") {
+            // 保持 ~ 在引号外以便 shell 展开，引号包裹其余部分处理空格
+            format!("~/\"{}\"", &path[2..])
+        } else {
+            // 对于其他路径，直接用双引号包裹
+            format!("\"{}\"", path)
         }
     }
 
@@ -304,7 +321,9 @@ impl SshService {
         ];
 
         for path in &common_paths {
-            let check_cmd = format!("test -x '{}' && echo 'ok'", path);
+            // 使用 quote_path_for_shell 正确处理 ~ 展开
+            let quoted_path = Self::quote_path_for_shell(path);
+            let check_cmd = format!("test -x {} && echo 'ok'", quoted_path);
             if let Ok(output) = self.execute(server_id, &check_cmd).await {
                 if output.trim() == "ok" {
                     log::info!("[get_sqlite3_path] Found sqlite3 at: {}", path);
@@ -318,19 +337,19 @@ impl SshService {
     }
 
     /// 检查远程是否安装了 sqlite3（返回路径或 None）
-    async fn check_remote_sqlite3(&self, server_id: &str) -> Option<String> {
+    pub async fn check_remote_sqlite3(&self, server_id: &str) -> Option<String> {
         self.get_sqlite3_path(server_id).await
     }
 
     /// 确保远程目录存在
-    async fn ensure_remote_dir(&self, server_id: &str, remote_path: &str) -> Result<(), SshError> {
+    pub async fn ensure_remote_dir(&self, server_id: &str, remote_path: &str) -> Result<(), SshError> {
         let parent = std::path::Path::new(remote_path).parent();
         if let Some(parent_path) = parent {
             if let Some(parent_str) = parent_path.to_str() {
-                // 使用双引号而不是单引号，这样 ~ 可以被 shell 正确展开
-                // 注意：双引号内的特殊字符（如 $）仍会被展开，但对于路径来说这通常是期望的行为
+                // 注意：~ 在引号内不会被展开，需要保持 ~ 在引号外
                 log::info!("[ensure_remote_dir] Creating directory: {}", parent_str);
-                self.execute(server_id, &format!("mkdir -p \"{}\"", parent_str)).await?;
+                let quoted_path = Self::quote_path_for_shell(parent_str);
+                self.execute(server_id, &format!("mkdir -p {}", quoted_path)).await?;
             }
         }
         Ok(())
@@ -340,12 +359,13 @@ impl SshService {
     /// 使用 cat + base64 方式 (假设远程有 cat 和 base64，如果没有 base64 则直接 cat，但需注意二进制安全)
     /// 为通用性，先尝试 base64，如果失败尝试直接 cat
     async fn download_file(&self, server_id: &str, remote_path: &str, local_path: &PathBuf) -> Result<(), SshError> {
-        // 使用双引号以便 ~ 展开
-        let content_base64 = match self.execute(server_id, &format!("cat \"{}\" | base64", remote_path)).await {
+        // 注意：~ 在引号内不会被展开，使用 quote_path_for_shell 正确处理
+        let quoted_path = Self::quote_path_for_shell(remote_path);
+        let content_base64 = match self.execute(server_id, &format!("cat {} | base64", quoted_path)).await {
             Ok(output) => output,
             Err(_) => {
                  // 尝试直接读取 (可能不安全，但作为备选)
-                 self.execute(server_id, &format!("cat \"{}\"", remote_path)).await?
+                 self.execute(server_id, &format!("cat {}", quoted_path)).await?
             }
         };
 
@@ -374,9 +394,10 @@ impl SshService {
         use base64::Engine;
         let b64 = base64::engine::general_purpose::STANDARD.encode(bytes);
 
-        // 使用双引号以便 ~ 展开
-        // echo 的内容使用单引号（不需要展开），输出路径使用双引号
-        let cmd = format!("echo '{}' | base64 -d > \"{}\"", b64, remote_path);
+        // 使用 quote_path_for_shell 正确处理 ~ 展开
+        // echo 的内容使用单引号（不需要展开）
+        let quoted_path = Self::quote_path_for_shell(remote_path);
+        let cmd = format!("echo '{}' | base64 -d > {}", b64, quoted_path);
         
         // 如果文件太大，cmd length 会爆。Config DB 通常很小。
         if cmd.len() > 100_000 {
@@ -387,29 +408,34 @@ impl SshService {
     }
 
     /// 查找远程数据库路径（仅查找，不创建，返回 path string）
-    /// 依次检查标准路径
+    /// 依次检查标准路径，返回原始的 ~ 路径格式以保证跨用户一致性
     async fn find_existing_db_path(&self, server_id: &str) -> Option<String> {
          let db_paths = vec![
+            // 首先检查本地默认路径（~/.cc-switch/）
+            "~/.cc-switch/cc-switch.db",
+            // 然后检查 XDG 标准路径
             "~/.config/cc-switch/cc-switch.db",
             "~/Library/Application Support/cc-switch/cc-switch.db",
             "~/.local/share/cc-switch/cc-switch.db",
         ];
 
         for path in &db_paths {
-            // 使用双引号：~ 会被展开，空格也能正确处理
-            let check_cmd = format!("ls \"{}\" 2>/dev/null", path);
-            log::info!("[find_existing_db_path] Checking: {}", path);
-            
+            // 使用 quote_path_for_shell 正确处理 ~ 展开
+            let quoted_path = Self::quote_path_for_shell(path);
+            let check_cmd = format!("test -f {} && echo 'exists'", quoted_path);
+            log::info!("[find_existing_db_path] Checking: {} (cmd: {})", path, check_cmd);
+
             match self.execute(server_id, &check_cmd).await {
                 Ok(result) => {
                     let trimmed = result.trim();
-                    log::info!("[find_existing_db_path] OK: '{}'", trimmed);
-                    if !trimmed.is_empty() {
-                        return Some(trimmed.to_string());
+                    log::info!("[find_existing_db_path] Result for {}: '{}'", path, trimmed);
+                    if trimmed == "exists" {
+                        // 返回原始的 ~ 路径格式，保证跨用户一致性
+                        return Some(path.to_string());
                     }
                 }
                 Err(e) => {
-                    // ls 找不到文件会返回 exit code 1 或 2
+                    // test 失败表示文件不存在
                     log::info!("[find_existing_db_path] Not found at {}: {:?}", path, e);
                 }
             }
@@ -418,11 +444,12 @@ impl SshService {
     }
 
     /// 解决数据库路径：如果存在则返回，不存在则返回默认路径
-    async fn resolve_db_path(&self, server_id: &str) -> String {
+    pub async fn resolve_db_path(&self, server_id: &str) -> String {
         if let Some(path) = self.find_existing_db_path(server_id).await {
             path
         } else {
-             "~/.config/cc-switch/cc-switch.db".to_string()
+            // 默认使用 ~/.cc-switch/cc-switch.db（与本地一致）
+             "~/.cc-switch/cc-switch.db".to_string()
         }
     }
 
@@ -436,6 +463,7 @@ impl SshService {
         // 1. 检查 sqlite3 是否可用（返回路径或 None）
         if let Some(sqlite3_path) = self.check_remote_sqlite3(server_id).await {
             let db_path = self.resolve_db_path(server_id).await;
+            let quoted_db_path = Self::quote_path_for_shell(&db_path);
 
             // 检查文件是否存在，如果不存在直接返回默认空配置
             let existing_path = self.find_existing_db_path(server_id).await;
@@ -449,10 +477,11 @@ impl SshService {
             }
             log::info!("[read_remote_config] Found DB at: {:?}", existing_path);
 
-            // Query with all fields matching local database structure
+            // Query with all fields matching frontend expected format
+            // Use camelCase field names to match Provider struct's serde rename attributes
              let query = format!(
-                "{} \"{}\" \"SELECT json_group_array(json_object('id', id, 'name', name, 'app_type', app_type, 'settingsConfig', settings_config, 'websiteUrl', website_url, 'category', category, 'createdAt', created_at, 'sortIndex', sort_index, 'notes', notes, 'icon', icon, 'iconColor', icon_color, 'meta', meta, 'isCurrent', is_current, 'isProxyTarget', is_proxy_target)) FROM providers WHERE app_type = '{}'\"",
-                sqlite3_path, db_path, app_type
+                "{} {} \"SELECT json_group_array(json_object('id', id, 'name', name, 'appType', app_type, 'settingsConfig', settings_config, 'websiteUrl', website_url, 'category', category, 'createdAt', created_at, 'sortIndex', sort_index, 'notes', notes, 'icon', icon, 'iconColor', icon_color, 'meta', meta, 'isCurrent', is_current, 'isProxyTarget', is_proxy_target)) FROM providers WHERE app_type = '{}'\"",
+                sqlite3_path, quoted_db_path, app_type
             );
 
             log::info!("[read_remote_config] Executing query: {}", query);
@@ -460,21 +489,21 @@ impl SshService {
             match self.execute(server_id, &query).await {
                 Ok(providers_json) => {
                     log::info!("[read_remote_config] Raw JSON from remote: {}", providers_json);
-                    
+
                      let providers: serde_json::Value = serde_json::from_str(&providers_json).map_err(|e| {
                          log::error!("[read_remote_config] JSON parse error: {}. Content: {}", e, providers_json);
                          SshError::FileReadFailed(format!("Failed to parse providers JSON from remote: {}", e))
                      })?;
-                     
+
                      let current_query = format!(
-                        "{} \"{}\" \"SELECT id FROM providers WHERE app_type = '{}' AND is_current = 1 LIMIT 1\"",
-                        sqlite3_path, db_path, app_type
+                        "{} {} \"SELECT id FROM providers WHERE app_type = '{}' AND is_current = 1 LIMIT 1\"",
+                        sqlite3_path, quoted_db_path, app_type
                     );
                     let current_id = self.execute(server_id, &current_query).await.ok().map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
 
                     let proxy_target_query = format!(
-                        "{} \"{}\" \"SELECT id FROM providers WHERE app_type = '{}' AND is_proxy_target = 1 LIMIT 1\"",
-                        sqlite3_path, db_path, app_type
+                        "{} {} \"SELECT id FROM providers WHERE app_type = '{}' AND is_proxy_target = 1 LIMIT 1\"",
+                        sqlite3_path, quoted_db_path, app_type
                     );
                     let proxy_target_id = self.execute(server_id, &proxy_target_query).await.ok().map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
 
@@ -517,11 +546,12 @@ impl SshService {
         // Open local DB
         let conn = rusqlite::Connection::open(&local_path).map_err(|e| SshError::FileReadFailed(e.to_string()))?;
 
-        // Query with all fields matching local database structure
+        // Query with all fields matching frontend expected format
         let mut stmt = conn.prepare(
             "SELECT id, name, settings_config, website_url, category, created_at, sort_index, notes, icon, icon_color, meta, is_current, is_proxy_target FROM providers WHERE app_type = ?"
         ).map_err(|e| SshError::FileReadFailed(e.to_string()))?;
 
+        // Use camelCase field names to match Provider struct's serde rename attributes
         let rows = stmt.query_map([app_type], |row| {
              Ok(serde_json::json!({
                  "id": row.get::<_, String>(0)?,
@@ -558,6 +588,8 @@ impl SshService {
     }
 
     /// 添加远程供应商
+    ///
+    /// 使用 ProviderService::add_with_store 复用验证和保存逻辑
     pub async fn add_remote_provider(
         &self,
         server_id: &str,
@@ -566,149 +598,26 @@ impl SshService {
     ) -> Result<(), SshError> {
         log::info!("[add_remote_provider] Starting for server: {}", server_id);
 
-        let sqlite3_path = self.check_remote_sqlite3(server_id).await;
-        let remote_db_path = self.resolve_db_path(server_id).await;
-
-        // 准备 SQL 参数 - 完全匹配本地数据库结构
+        // Parse provider from JSON
         let id = provider["id"].as_str().unwrap_or("").to_string();
-        let name = provider["name"].as_str().unwrap_or("").to_string();
-        let settings_config = provider["settingsConfig"].to_string();
-        let category = provider["category"].as_str().map(|s| s.to_string());
-        let website_url = provider["websiteUrl"].as_str().map(|s| s.to_string());
-        let icon = provider["icon"].as_str().map(|s| s.to_string());
-        let icon_color = provider["iconColor"].as_str().map(|s| s.to_string());
-        let sort_index = provider["sortIndex"].as_i64();
-        let notes = provider["notes"].as_str().map(|s| s.to_string());
-        let created_at = provider["createdAt"].as_i64();
-        // meta 字段需要序列化
-        let meta = provider["meta"].to_string();
-        let is_proxy_target = provider["isProxyTarget"].as_bool().unwrap_or(false);
+        let parsed_provider = Provider::from_db_json(provider, id)
+            .map_err(|e| SshError::InvalidConfig(format!("Failed to parse provider: {}", e)))?;
 
-        if let Some(sqlite3) = sqlite3_path {
-             // 使用远程 sqlite3 执行命令
-             // We use 'ensure_remote_dir' first to be safe
-             self.ensure_remote_dir(server_id, &remote_db_path).await?;
+        // Create store and use ProviderService
+        let store = RemoteProviderStore::new(self, server_id.to_string());
+        let app_type_enum = crate::app_config::AppType::from_str(app_type)
+            .map_err(|e| SshError::InvalidConfig(e.to_string()))?;
 
-            // Create schema if needed - matching local database structure exactly
-             let create_table_sql = r#"CREATE TABLE IF NOT EXISTS providers (
-                id TEXT NOT NULL,
-                app_type TEXT NOT NULL,
-                name TEXT NOT NULL,
-                settings_config TEXT NOT NULL,
-                website_url TEXT,
-                category TEXT,
-                created_at INTEGER,
-                sort_index INTEGER,
-                notes TEXT,
-                icon TEXT,
-                icon_color TEXT,
-                meta TEXT NOT NULL DEFAULT '{}',
-                is_current INTEGER NOT NULL DEFAULT 0,
-                is_proxy_target INTEGER NOT NULL DEFAULT 0,
-                PRIMARY KEY (id, app_type)
-            )"#;
-            self.execute(server_id, &format!("{} \"{}\" \"{}\"", sqlite3, remote_db_path, create_table_sql)).await?;
+        crate::services::provider::ProviderService::add_with_store(&store, app_type_enum, parsed_provider)
+            .map_err(|e| SshError::CommandFailed(format!("Failed to add provider: {}", e)))?;
 
-            // Create provider_endpoints table - matching local structure
-            let create_endpoints_sql = r#"CREATE TABLE IF NOT EXISTS provider_endpoints (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                provider_id TEXT NOT NULL,
-                app_type TEXT NOT NULL,
-                url TEXT NOT NULL,
-                added_at INTEGER,
-                FOREIGN KEY (provider_id, app_type) REFERENCES providers(id, app_type) ON DELETE CASCADE
-            )"#;
-            self.execute(server_id, &format!("{} \"{}\" \"{}\"", sqlite3, remote_db_path, create_endpoints_sql)).await?;
-
-            // Insert - matching local database structure
-             let sql_escape = |s: &str| s.replace("'", "''");
-             let sql = format!(
-                "INSERT INTO providers (id, app_type, name, settings_config, website_url, category, created_at, sort_index, notes, icon, icon_color, meta, is_current, is_proxy_target) VALUES ('{}', '{}', '{}', '{}', {}, {}, {}, {}, {}, {}, {}, '{}', 0, {})",
-                sql_escape(&id),
-                app_type,
-                sql_escape(&name),
-                sql_escape(&settings_config),
-                website_url.as_ref().map(|s| format!("'{}'", sql_escape(s))).unwrap_or("NULL".to_string()),
-                category.as_ref().map(|s| format!("'{}'", sql_escape(s))).unwrap_or("NULL".to_string()),
-                created_at.map(|v| v.to_string()).unwrap_or("NULL".to_string()),
-                sort_index.map(|v| v.to_string()).unwrap_or("NULL".to_string()),
-                notes.as_ref().map(|s| format!("'{}'", sql_escape(s))).unwrap_or("NULL".to_string()),
-                icon.as_ref().map(|s| format!("'{}'", sql_escape(s))).unwrap_or("NULL".to_string()),
-                icon_color.as_ref().map(|s| format!("'{}'", sql_escape(s))).unwrap_or("NULL".to_string()),
-                sql_escape(&meta),
-                if is_proxy_target { 1 } else { 0 }
-            );
-            // 对于 SQL 语句，我们需要用单引号包裹并转义内部的单引号
-            // 但是 db_path 使用双引号以便 ~ 展开
-             self.execute(server_id, &format!("{} \"{}\" '{}'", sqlite3, remote_db_path, sql.replace("'", "'\\''"))).await.map(|_| ())
-        } else {
-             // Fallback: Download -> modify -> upload
-             log::info!("[add_remote_provider] sqlite3 missing, swapping to local modify mode");
-
-             let temp_dir = tempfile::tempdir().map_err(|e| SshError::FileReadFailed(e.to_string()))?;
-             let local_path = temp_dir.path().join("cc-switch.db");
-
-             // Check if remote DB exists
-             if self.find_existing_db_path(server_id).await.is_some() {
-                 self.download_file(server_id, &remote_db_path, &local_path).await?;
-             }
-
-             // Use local rusqlite to open/create
-             let conn = rusqlite::Connection::open(&local_path).map_err(|e| SshError::FileReadFailed(e.to_string()))?;
-
-             // Ensure schema - matching local database structure exactly
-             conn.execute(
-                r#"CREATE TABLE IF NOT EXISTS providers (
-                    id TEXT NOT NULL,
-                    app_type TEXT NOT NULL,
-                    name TEXT NOT NULL,
-                    settings_config TEXT NOT NULL,
-                    website_url TEXT,
-                    category TEXT,
-                    created_at INTEGER,
-                    sort_index INTEGER,
-                    notes TEXT,
-                    icon TEXT,
-                    icon_color TEXT,
-                    meta TEXT NOT NULL DEFAULT '{}',
-                    is_current INTEGER NOT NULL DEFAULT 0,
-                    is_proxy_target INTEGER NOT NULL DEFAULT 0,
-                    PRIMARY KEY (id, app_type)
-                )"#,
-                [],
-            ).map_err(|e| SshError::FileReadFailed(e.to_string()))?;
-
-            // Create provider_endpoints table
-            conn.execute(
-                r#"CREATE TABLE IF NOT EXISTS provider_endpoints (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    provider_id TEXT NOT NULL,
-                    app_type TEXT NOT NULL,
-                    url TEXT NOT NULL,
-                    added_at INTEGER,
-                    FOREIGN KEY (provider_id, app_type) REFERENCES providers(id, app_type) ON DELETE CASCADE
-                )"#,
-                [],
-            ).map_err(|e| SshError::FileReadFailed(e.to_string()))?;
-
-            // Insert - matching local database structure
-            conn.execute(
-                "INSERT INTO providers (id, app_type, name, settings_config, website_url, category, created_at, sort_index, notes, icon, icon_color, meta, is_current, is_proxy_target) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, 0, ?13)",
-                rusqlite::params![id, app_type, name, settings_config, website_url, category, created_at, sort_index, notes, icon, icon_color, meta, is_proxy_target],
-            ).map_err(|e| SshError::FileReadFailed(e.to_string()))?;
-
-            // Close connection explicitly (drop)
-            drop(conn);
-
-            // Upload
-            self.ensure_remote_dir(server_id, &remote_db_path).await?;
-            self.upload_file(server_id, &local_path, &remote_db_path).await?;
-
-            Ok(())
-        }
+        log::info!("[add_remote_provider] Successfully added provider on server {}", server_id);
+        Ok(())
     }
 
     /// 更新远程供应商
+    ///
+    /// 使用 ProviderService::update_with_store 复用验证和保存逻辑
     pub async fn update_remote_provider(
         &self,
         server_id: &str,
@@ -717,63 +626,26 @@ impl SshService {
     ) -> Result<(), SshError> {
         log::info!("[update_remote_provider] Starting for server: {}", server_id);
 
-        let sqlite3_path = self.check_remote_sqlite3(server_id).await;
-        let remote_db_path = self.resolve_db_path(server_id).await;
-
-        // 准备 SQL 参数
+        // Parse provider from JSON
         let id = provider["id"].as_str().unwrap_or("").to_string();
-        let name = provider["name"].as_str().unwrap_or("").to_string();
-        let settings_config = provider["settingsConfig"].to_string();
-        let category = provider["category"].as_str().map(|s| s.to_string());
-        let website_url = provider["websiteUrl"].as_str().map(|s| s.to_string());
-        let icon = provider["icon"].as_str().map(|s| s.to_string());
-        let icon_color = provider["iconColor"].as_str().map(|s| s.to_string());
-        let sort_index = provider["sortIndex"].as_i64();
-        let notes = provider["notes"].as_str().map(|s| s.to_string());
-        let meta = provider["meta"].to_string();
+        let parsed_provider = Provider::from_db_json(provider, id)
+            .map_err(|e| SshError::InvalidConfig(format!("Failed to parse provider: {}", e)))?;
 
-        if let Some(sqlite3) = sqlite3_path {
-            let sql_escape = |s: &str| s.replace("'", "''");
-            let sql = format!(
-                "UPDATE providers SET name='{}', settings_config='{}', website_url={}, category={}, sort_index={}, notes={}, icon={}, icon_color={}, meta='{}' WHERE id='{}' AND app_type='{}'",
-                sql_escape(&name),
-                sql_escape(&settings_config),
-                website_url.as_ref().map(|s| format!("'{}'", sql_escape(s))).unwrap_or("NULL".to_string()),
-                category.as_ref().map(|s| format!("'{}'", sql_escape(s))).unwrap_or("NULL".to_string()),
-                sort_index.map(|v| v.to_string()).unwrap_or("NULL".to_string()),
-                notes.as_ref().map(|s| format!("'{}'", sql_escape(s))).unwrap_or("NULL".to_string()),
-                icon.as_ref().map(|s| format!("'{}'", sql_escape(s))).unwrap_or("NULL".to_string()),
-                icon_color.as_ref().map(|s| format!("'{}'", sql_escape(s))).unwrap_or("NULL".to_string()),
-                sql_escape(&meta),
-                sql_escape(&id),
-                app_type
-            );
-            self.execute(server_id, &format!("{} \"{}\" '{}'", sqlite3, remote_db_path, sql.replace("'", "'\\''"))).await.map(|_| ())
-        } else {
-            // Fallback: Download -> modify -> upload
-            log::info!("[update_remote_provider] sqlite3 missing, using local modify mode");
+        // Create store and use ProviderService
+        let store = RemoteProviderStore::new(self, server_id.to_string());
+        let app_type_enum = crate::app_config::AppType::from_str(app_type)
+            .map_err(|e| SshError::InvalidConfig(e.to_string()))?;
 
-            let temp_dir = tempfile::tempdir().map_err(|e| SshError::FileReadFailed(e.to_string()))?;
-            let local_path = temp_dir.path().join("cc-switch.db");
+        crate::services::provider::ProviderService::update_with_store(&store, app_type_enum, parsed_provider)
+            .map_err(|e| SshError::CommandFailed(format!("Failed to update provider: {}", e)))?;
 
-            self.download_file(server_id, &remote_db_path, &local_path).await?;
-
-            let conn = rusqlite::Connection::open(&local_path).map_err(|e| SshError::FileReadFailed(e.to_string()))?;
-
-            conn.execute(
-                "UPDATE providers SET name=?1, settings_config=?2, website_url=?3, category=?4, sort_index=?5, notes=?6, icon=?7, icon_color=?8, meta=?9 WHERE id=?10 AND app_type=?11",
-                rusqlite::params![name, settings_config, website_url, category, sort_index, notes, icon, icon_color, meta, id, app_type],
-            ).map_err(|e| SshError::FileReadFailed(e.to_string()))?;
-
-            drop(conn);
-
-            self.upload_file(server_id, &local_path, &remote_db_path).await?;
-
-            Ok(())
-        }
+        log::info!("[update_remote_provider] Successfully updated provider on server {}", server_id);
+        Ok(())
     }
 
     /// 删除远程供应商
+    ///
+    /// 使用 ProviderService::delete_with_store 复用删除逻辑
     pub async fn delete_remote_provider(
         &self,
         server_id: &str,
@@ -782,43 +654,21 @@ impl SshService {
     ) -> Result<(), SshError> {
         log::info!("[delete_remote_provider] Starting for server: {}, provider: {}", server_id, provider_id);
 
-        let sqlite3_path = self.check_remote_sqlite3(server_id).await;
-        let remote_db_path = self.resolve_db_path(server_id).await;
+        // Create store and use ProviderService
+        let store = RemoteProviderStore::new(self, server_id.to_string());
+        let app_type_enum = crate::app_config::AppType::from_str(app_type)
+            .map_err(|e| SshError::InvalidConfig(e.to_string()))?;
 
-        if let Some(sqlite3) = sqlite3_path {
-            let sql_escape = |s: &str| s.replace("'", "''");
-            let sql = format!(
-                "DELETE FROM providers WHERE id='{}' AND app_type='{}'",
-                sql_escape(provider_id),
-                app_type
-            );
-            self.execute(server_id, &format!("{} \"{}\" '{}'", sqlite3, remote_db_path, sql.replace("'", "'\\''"))).await.map(|_| ())
-        } else {
-            let temp_dir = tempfile::tempdir().map_err(|e| SshError::FileReadFailed(e.to_string()))?;
-            let local_path = temp_dir.path().join("cc-switch.db");
+        crate::services::provider::ProviderService::delete_with_store(&store, app_type_enum, provider_id)
+            .map_err(|e| SshError::CommandFailed(format!("Failed to delete provider: {}", e)))?;
 
-            self.download_file(server_id, &remote_db_path, &local_path).await?;
-
-            let conn = rusqlite::Connection::open(&local_path).map_err(|e| SshError::FileReadFailed(e.to_string()))?;
-
-            conn.execute(
-                "DELETE FROM providers WHERE id=?1 AND app_type=?2",
-                rusqlite::params![provider_id, app_type],
-            ).map_err(|e| SshError::FileReadFailed(e.to_string()))?;
-
-            drop(conn);
-
-            self.upload_file(server_id, &local_path, &remote_db_path).await?;
-
-            Ok(())
-        }
+        log::info!("[delete_remote_provider] Successfully deleted provider {} on server {}", provider_id, server_id);
+        Ok(())
     }
 
     /// 设置远程当前供应商
     ///
-    /// 与本地切换 provider 类似：
-    /// 1. 更新数据库中的 is_current 字段
-    /// 2. 将 provider 的 settings_config 写入远程的 live 配置文件
+    /// 使用 ProviderService::switch_with_store 复用切换逻辑
     pub async fn set_remote_current_provider(
         &self,
         server_id: &str,
@@ -827,86 +677,20 @@ impl SshService {
     ) -> Result<(), SshError> {
         log::info!("[set_remote_current_provider] Starting for server: {}, provider: {}, app_type: {}", server_id, provider_id, app_type);
 
-        let sqlite3_path = self.check_remote_sqlite3(server_id).await;
-        let remote_db_path = self.resolve_db_path(server_id).await;
+        // Create store and use ProviderService
+        let store = RemoteProviderStore::new(self, server_id.to_string());
+        let app_type_enum = crate::app_config::AppType::from_str(app_type)
+            .map_err(|e| SshError::InvalidConfig(e.to_string()))?;
 
-        // Step 1: Get provider's settings_config from remote database
-        let settings_config: serde_json::Value = if let Some(ref sqlite3) = sqlite3_path {
-            // Use remote sqlite3 to query settings_config
-            let sql_escape = |s: &str| s.replace("'", "''");
-            let sql = format!(
-                "SELECT settings_config FROM providers WHERE id='{}' AND app_type='{}'",
-                sql_escape(provider_id),
-                app_type
-            );
-            let cmd = format!("{} \"{}\" '{}'", sqlite3, remote_db_path, sql.replace("'", "'\\''"));
-            let result = self.execute(server_id, &cmd).await?;
-            let trimmed = result.trim();
-            if trimmed.is_empty() {
-                return Err(SshError::InvalidConfig(format!("Provider {} not found", provider_id)));
-            }
-            serde_json::from_str(trimmed).unwrap_or(serde_json::Value::Null)
-        } else {
-            // Download DB and query locally
-            let temp_dir = tempfile::tempdir().map_err(|e| SshError::FileReadFailed(e.to_string()))?;
-            let local_path = temp_dir.path().join("cc-switch.db");
-            self.download_file(server_id, &remote_db_path, &local_path).await?;
-
-            let conn = rusqlite::Connection::open(&local_path).map_err(|e| SshError::FileReadFailed(e.to_string()))?;
-            let settings_config_str: String = conn.query_row(
-                "SELECT settings_config FROM providers WHERE id=?1 AND app_type=?2",
-                rusqlite::params![provider_id, app_type],
-                |row| row.get(0),
-            ).map_err(|e| SshError::InvalidConfig(format!("Provider {} not found: {}", provider_id, e)))?;
-
-            serde_json::from_str(&settings_config_str).unwrap_or(serde_json::Value::Null)
-        };
-
-        log::info!("[set_remote_current_provider] Got settings_config for provider {}", provider_id);
-
-        // Step 2: Update is_current in database
-        if let Some(ref sqlite3) = sqlite3_path {
-            let sql_escape = |s: &str| s.replace("'", "''");
-            // 先重置所有为 0，再设置指定的为 1
-            let sql = format!(
-                "UPDATE providers SET is_current=0 WHERE app_type='{}'; UPDATE providers SET is_current=1 WHERE id='{}' AND app_type='{}'",
-                app_type,
-                sql_escape(provider_id),
-                app_type
-            );
-            self.execute(server_id, &format!("{} \"{}\" '{}'", sqlite3, remote_db_path, sql.replace("'", "'\\''"))).await?;
-        } else {
-            let temp_dir = tempfile::tempdir().map_err(|e| SshError::FileReadFailed(e.to_string()))?;
-            let local_path = temp_dir.path().join("cc-switch.db");
-
-            self.download_file(server_id, &remote_db_path, &local_path).await?;
-
-            let conn = rusqlite::Connection::open(&local_path).map_err(|e| SshError::FileReadFailed(e.to_string()))?;
-
-            conn.execute(
-                "UPDATE providers SET is_current=0 WHERE app_type=?1",
-                rusqlite::params![app_type],
-            ).map_err(|e| SshError::FileReadFailed(e.to_string()))?;
-
-            conn.execute(
-                "UPDATE providers SET is_current=1 WHERE id=?1 AND app_type=?2",
-                rusqlite::params![provider_id, app_type],
-            ).map_err(|e| SshError::FileReadFailed(e.to_string()))?;
-
-            drop(conn);
-
-            self.upload_file(server_id, &local_path, &remote_db_path).await?;
-        }
-
-        // Step 3: Write settings_config to remote live config file
-        self.write_remote_live_config(server_id, app_type, &settings_config).await?;
+        crate::services::provider::ProviderService::switch_with_store(&store, app_type_enum, provider_id)
+            .map_err(|e| SshError::CommandFailed(format!("Failed to switch provider: {}", e)))?;
 
         log::info!("[set_remote_current_provider] Successfully switched provider {} on server {}", provider_id, server_id);
         Ok(())
     }
 
     /// 将 settings_config 写入远程的 live 配置文件
-    async fn write_remote_live_config(
+    pub async fn write_remote_live_config(
         &self,
         server_id: &str,
         app_type: &str,
@@ -1005,6 +789,7 @@ impl SshService {
 
         let sqlite3_path = self.check_remote_sqlite3(server_id).await;
         let remote_db_path = self.resolve_db_path(server_id).await;
+        let quoted_db_path = Self::quote_path_for_shell(&remote_db_path);
 
         if let Some(sqlite3) = sqlite3_path {
             let sql_escape = |s: &str| s.replace("'", "''");
@@ -1014,7 +799,7 @@ impl SshService {
                 sql_escape(provider_id),
                 app_type
             );
-            self.execute(server_id, &format!("{} \"{}\" '{}'", sqlite3, remote_db_path, sql.replace("'", "'\\''"))).await.map(|_| ())
+            self.execute(server_id, &format!("{} {} '{}'", sqlite3, quoted_db_path, sql.replace("'", "'\\''"))).await.map(|_| ())
         } else {
             let temp_dir = tempfile::tempdir().map_err(|e| SshError::FileReadFailed(e.to_string()))?;
             let local_path = temp_dir.path().join("cc-switch.db");
@@ -1304,3 +1089,291 @@ impl Default for SshService {
         Self::new()
     }
 }
+
+// ==================== RemoteProviderStore Implementation ====================
+//
+// This implements the ProviderStore trait for remote SSH-based provider management.
+// It allows ProviderService to work transparently with remote servers.
+
+use crate::database::ProviderStore;
+use crate::error::AppError;
+use crate::provider::Provider;
+use indexmap::IndexMap;
+
+/// Remote Provider Store implementation
+///
+/// Implements ProviderStore trait for remote SSH-connected servers.
+/// Uses blocking async operations internally since the trait is sync.
+pub struct RemoteProviderStore<'a> {
+    ssh_service: &'a SshService,
+    server_id: String,
+}
+
+impl<'a> RemoteProviderStore<'a> {
+    pub fn new(ssh_service: &'a SshService, server_id: String) -> Self {
+        Self {
+            ssh_service,
+            server_id,
+        }
+    }
+
+    /// Get the sqlite3 path and db path for remote operations
+    fn get_db_info(&self) -> Result<(Option<String>, String), AppError> {
+        let rt = tokio::runtime::Handle::try_current()
+            .map_err(|_| AppError::Message("No tokio runtime available".into()))?;
+
+        // 使用 block_in_place 避免在 async 上下文中调用 block_on 导致 panic
+        let (sqlite3_path, db_path) = tokio::task::block_in_place(|| {
+            rt.block_on(async {
+                let sqlite3_path = self.ssh_service.check_remote_sqlite3(&self.server_id).await;
+                let db_path = self.ssh_service.resolve_db_path(&self.server_id).await;
+                (sqlite3_path, db_path)
+            })
+        });
+
+        Ok((sqlite3_path, db_path))
+    }
+
+    /// Execute SQL on remote database
+    fn execute_sql(&self, sql: &str) -> Result<String, AppError> {
+        let (sqlite3_path, db_path) = self.get_db_info()?;
+
+        let sqlite3 = sqlite3_path.ok_or_else(|| {
+            AppError::Message("Remote server does not have sqlite3 installed".into())
+        })?;
+
+        let rt = tokio::runtime::Handle::try_current()
+            .map_err(|_| AppError::Message("No tokio runtime available".into()))?;
+
+        // Escape single quotes in SQL for shell
+        let escaped_sql = sql.replace("'", "'\\''");
+        let quoted_db_path = SshService::quote_path_for_shell(&db_path);
+        let cmd = format!("{} {} '{}'", sqlite3, quoted_db_path, escaped_sql);
+
+        tokio::task::block_in_place(|| {
+            rt.block_on(self.ssh_service.execute(&self.server_id, &cmd))
+        })
+        .map_err(|e| AppError::Message(format!("SSH SQL execution failed: {}", e)))
+    }
+
+    /// SQL escape helper
+    fn sql_escape(s: &str) -> String {
+        s.replace("'", "''")
+    }
+}
+
+impl ProviderStore for RemoteProviderStore<'_> {
+    fn get_all_providers(&self, app_type: &str) -> Result<IndexMap<String, Provider>, AppError> {
+        let (sqlite3_path, db_path) = self.get_db_info()?;
+
+        let sqlite3 = match sqlite3_path {
+            Some(p) => p,
+            None => return Ok(IndexMap::new()), // No sqlite3, return empty
+        };
+
+        let rt = tokio::runtime::Handle::try_current()
+            .map_err(|_| AppError::Message("No tokio runtime available".into()))?;
+
+        // Query all providers as JSON
+        let quoted_db_path = SshService::quote_path_for_shell(&db_path);
+        let query = format!(
+            "{} {} \"SELECT json_group_array(json_object('id', id, 'name', name, 'appType', app_type, 'settingsConfig', settings_config, 'websiteUrl', website_url, 'category', category, 'createdAt', created_at, 'sortIndex', sort_index, 'notes', notes, 'icon', icon, 'iconColor', icon_color, 'meta', meta, 'isCurrent', is_current, 'isProxyTarget', is_proxy_target)) FROM providers WHERE app_type = '{}'\"",
+            sqlite3, quoted_db_path, app_type
+        );
+
+        let result = tokio::task::block_in_place(|| {
+            rt.block_on(self.ssh_service.execute(&self.server_id, &query))
+        })
+        .map_err(|e| AppError::Message(format!("Failed to query providers: {}", e)))?;
+
+        // Parse JSON result
+        let providers_json: serde_json::Value = serde_json::from_str(&result)
+            .map_err(|e| AppError::Message(format!("Failed to parse providers JSON: {}", e)))?;
+
+        let mut providers = IndexMap::new();
+        if let Some(arr) = providers_json.as_array() {
+            for item in arr {
+                if let Some(id) = item["id"].as_str() {
+                    if let Ok(provider) = Provider::from_db_json(item, id.to_string()) {
+                        providers.insert(id.to_string(), provider);
+                    }
+                }
+            }
+        }
+
+        Ok(providers)
+    }
+
+    fn get_provider_by_id(&self, id: &str, app_type: &str) -> Result<Option<Provider>, AppError> {
+        let providers = self.get_all_providers(app_type)?;
+        Ok(providers.get(id).cloned())
+    }
+
+    fn save_provider(&self, app_type: &str, provider: &Provider) -> Result<(), AppError> {
+        let (sqlite3_path, db_path) = self.get_db_info()?;
+
+        let sqlite3 = sqlite3_path.ok_or_else(|| {
+            AppError::Message("Remote server does not have sqlite3 installed".into())
+        })?;
+
+        let rt = tokio::runtime::Handle::try_current()
+            .map_err(|_| AppError::Message("No tokio runtime available".into()))?;
+
+        // Ensure directory and table exist
+        tokio::task::block_in_place(|| {
+            rt.block_on(self.ssh_service.ensure_remote_dir(&self.server_id, &db_path))
+        })
+            .map_err(|e| AppError::Message(e.to_string()))?;
+
+        // Create table if not exists
+        let quoted_db_path = SshService::quote_path_for_shell(&db_path);
+        let create_table_sql = r#"CREATE TABLE IF NOT EXISTS providers (
+            id TEXT NOT NULL,
+            app_type TEXT NOT NULL,
+            name TEXT NOT NULL,
+            settings_config TEXT NOT NULL,
+            website_url TEXT,
+            category TEXT,
+            created_at INTEGER,
+            sort_index INTEGER,
+            notes TEXT,
+            icon TEXT,
+            icon_color TEXT,
+            meta TEXT NOT NULL DEFAULT '{}',
+            is_current INTEGER NOT NULL DEFAULT 0,
+            is_proxy_target INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (id, app_type)
+        )"#;
+        let cmd = format!("{} {} \"{}\"", sqlite3, quoted_db_path, create_table_sql);
+        tokio::task::block_in_place(|| {
+            rt.block_on(self.ssh_service.execute(&self.server_id, &cmd))
+        })
+        .map_err(|e| AppError::Message(format!("Failed to create table: {}", e)))?;
+
+        // Prepare values
+        let settings_config_str = serde_json::to_string(&provider.settings_config).unwrap_or_default();
+        let meta_str = provider
+            .meta
+            .as_ref()
+            .map(|m| serde_json::to_string(m).unwrap_or_default())
+            .unwrap_or_else(|| "{}".to_string());
+
+        // Check if provider exists
+        let check_sql = format!(
+            "SELECT COUNT(*) FROM providers WHERE id='{}' AND app_type='{}'",
+            Self::sql_escape(&provider.id),
+            app_type
+        );
+        let check_cmd = format!("{} {} '{}'", sqlite3, quoted_db_path, check_sql.replace("'", "'\\''"));
+        let count_str = tokio::task::block_in_place(|| {
+            rt.block_on(self.ssh_service.execute(&self.server_id, &check_cmd))
+        })
+        .map_err(|e| AppError::Message(format!("Failed to check provider: {}", e)))?;
+        let exists = count_str.trim().parse::<i32>().unwrap_or(0) > 0;
+
+        if exists {
+            // Update
+            let sql = format!(
+                "UPDATE providers SET name='{}', settings_config='{}', website_url={}, category={}, sort_index={}, notes={}, icon={}, icon_color={}, meta='{}' WHERE id='{}' AND app_type='{}'",
+                Self::sql_escape(&provider.name),
+                Self::sql_escape(&settings_config_str),
+                provider.website_url.as_ref().map(|s| format!("'{}'", Self::sql_escape(s))).unwrap_or_else(|| "NULL".to_string()),
+                provider.category.as_ref().map(|s| format!("'{}'", Self::sql_escape(s))).unwrap_or_else(|| "NULL".to_string()),
+                provider.sort_index.map(|v| v.to_string()).unwrap_or_else(|| "NULL".to_string()),
+                provider.notes.as_ref().map(|s| format!("'{}'", Self::sql_escape(s))).unwrap_or_else(|| "NULL".to_string()),
+                provider.icon.as_ref().map(|s| format!("'{}'", Self::sql_escape(s))).unwrap_or_else(|| "NULL".to_string()),
+                provider.icon_color.as_ref().map(|s| format!("'{}'", Self::sql_escape(s))).unwrap_or_else(|| "NULL".to_string()),
+                Self::sql_escape(&meta_str),
+                Self::sql_escape(&provider.id),
+                app_type
+            );
+            self.execute_sql(&sql)?;
+        } else {
+            // Insert
+            let sql = format!(
+                "INSERT INTO providers (id, app_type, name, settings_config, website_url, category, created_at, sort_index, notes, icon, icon_color, meta, is_current, is_proxy_target) VALUES ('{}', '{}', '{}', '{}', {}, {}, {}, {}, {}, {}, {}, '{}', 0, {})",
+                Self::sql_escape(&provider.id),
+                app_type,
+                Self::sql_escape(&provider.name),
+                Self::sql_escape(&settings_config_str),
+                provider.website_url.as_ref().map(|s| format!("'{}'", Self::sql_escape(s))).unwrap_or_else(|| "NULL".to_string()),
+                provider.category.as_ref().map(|s| format!("'{}'", Self::sql_escape(s))).unwrap_or_else(|| "NULL".to_string()),
+                provider.created_at.map(|v| v.to_string()).unwrap_or_else(|| "NULL".to_string()),
+                provider.sort_index.map(|v| v.to_string()).unwrap_or_else(|| "NULL".to_string()),
+                provider.notes.as_ref().map(|s| format!("'{}'", Self::sql_escape(s))).unwrap_or_else(|| "NULL".to_string()),
+                provider.icon.as_ref().map(|s| format!("'{}'", Self::sql_escape(s))).unwrap_or_else(|| "NULL".to_string()),
+                provider.icon_color.as_ref().map(|s| format!("'{}'", Self::sql_escape(s))).unwrap_or_else(|| "NULL".to_string()),
+                Self::sql_escape(&meta_str),
+                if provider.is_proxy_target.unwrap_or(false) { 1 } else { 0 }
+            );
+            self.execute_sql(&sql)?;
+        }
+
+        Ok(())
+    }
+
+    fn delete_provider(&self, app_type: &str, id: &str) -> Result<(), AppError> {
+        let sql = format!(
+            "DELETE FROM providers WHERE id='{}' AND app_type='{}'",
+            Self::sql_escape(id),
+            app_type
+        );
+        self.execute_sql(&sql)?;
+        Ok(())
+    }
+
+    fn get_current_provider(&self, app_type: &str) -> Result<Option<String>, AppError> {
+        let sql = format!(
+            "SELECT id FROM providers WHERE app_type='{}' AND is_current=1 LIMIT 1",
+            app_type
+        );
+        let result = self.execute_sql(&sql)?;
+        let id = result.trim();
+        if id.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(id.to_string()))
+        }
+    }
+
+    fn set_current_provider(&self, app_type: &str, id: &str) -> Result<(), AppError> {
+        // Reset all to 0, then set the target to 1
+        let sql = format!(
+            "UPDATE providers SET is_current=0 WHERE app_type='{}'; UPDATE providers SET is_current=1 WHERE id='{}' AND app_type='{}'",
+            app_type,
+            Self::sql_escape(id),
+            app_type
+        );
+        self.execute_sql(&sql)?;
+        Ok(())
+    }
+
+    fn set_proxy_target_provider(&self, app_type: &str, id: &str) -> Result<(), AppError> {
+        // Reset all to 0, then set the target to 1
+        let sql = format!(
+            "UPDATE providers SET is_proxy_target=0 WHERE app_type='{}'; UPDATE providers SET is_proxy_target=1 WHERE id='{}' AND app_type='{}'",
+            app_type,
+            Self::sql_escape(id),
+            app_type
+        );
+        self.execute_sql(&sql)?;
+        Ok(())
+    }
+
+    fn write_live_config(&self, app_type: &str, settings_config: &serde_json::Value) -> Result<(), AppError> {
+        let rt = tokio::runtime::Handle::try_current()
+            .map_err(|_| AppError::Message("No tokio runtime available".into()))?;
+
+        tokio::task::block_in_place(|| {
+            rt.block_on(
+                self.ssh_service
+                    .write_remote_live_config(&self.server_id, app_type, settings_config),
+            )
+        })
+        .map_err(|e| AppError::Message(format!("Failed to write remote live config: {}", e)))
+    }
+}
+
+// RemoteProviderStore is used internally and re-exported via services module if needed
+#[allow(dead_code)]
+pub use RemoteProviderStore as SshProviderStore;

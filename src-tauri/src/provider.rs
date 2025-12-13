@@ -65,6 +65,99 @@ impl Provider {
             is_proxy_target: None,
         }
     }
+
+    /// 从前端 JSON (camelCase) 解析为 Provider
+    ///
+    /// 支持前端传入的 JSON 格式，自动处理 camelCase 字段名
+    pub fn from_frontend_json(value: &Value) -> Result<Self, crate::error::AppError> {
+        // 尝试直接反序列化（Provider 已经配置了 serde rename）
+        serde_json::from_value(value.clone()).map_err(|e| {
+            crate::error::AppError::Message(format!("Failed to parse provider JSON: {}", e))
+        })
+    }
+
+    /// 从数据库查询结果的 JSON 解析为 Provider
+    ///
+    /// 处理远程 SSH 查询返回的 JSON 格式
+    pub fn from_db_json(value: &Value, id: String) -> Result<Self, crate::error::AppError> {
+        let name = value["name"]
+            .as_str()
+            .unwrap_or("")
+            .to_string();
+
+        // settingsConfig 可能是字符串（需要解析）或对象
+        let settings_config = if let Some(s) = value["settingsConfig"].as_str() {
+            serde_json::from_str(s).unwrap_or(Value::Null)
+        } else if let Some(s) = value["settings_config"].as_str() {
+            serde_json::from_str(s).unwrap_or(Value::Null)
+        } else {
+            value.get("settingsConfig")
+                .or_else(|| value.get("settings_config"))
+                .cloned()
+                .unwrap_or(Value::Null)
+        };
+
+        let website_url = value
+            .get("websiteUrl")
+            .or_else(|| value.get("website_url"))
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+
+        let category = value["category"].as_str().map(|s| s.to_string());
+
+        let created_at = value
+            .get("createdAt")
+            .or_else(|| value.get("created_at"))
+            .and_then(|v| v.as_i64());
+
+        let sort_index = value
+            .get("sortIndex")
+            .or_else(|| value.get("sort_index"))
+            .and_then(|v| v.as_u64())
+            .map(|v| v as usize);
+
+        let notes = value["notes"].as_str().map(|s| s.to_string());
+        let icon = value["icon"].as_str().map(|s| s.to_string());
+
+        let icon_color = value
+            .get("iconColor")
+            .or_else(|| value.get("icon_color"))
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+
+        let is_proxy_target = value
+            .get("isProxyTarget")
+            .or_else(|| value.get("is_proxy_target"))
+            .and_then(|v| v.as_bool());
+
+        // 解析 meta 字段
+        let meta = if let Some(meta_value) = value.get("meta") {
+            if let Some(meta_str) = meta_value.as_str() {
+                serde_json::from_str(meta_str).ok()
+            } else if meta_value.is_object() {
+                serde_json::from_value(meta_value.clone()).ok()
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        Ok(Self {
+            id,
+            name,
+            settings_config,
+            website_url,
+            category,
+            created_at,
+            sort_index,
+            notes,
+            meta,
+            icon,
+            icon_color,
+            is_proxy_target,
+        })
+    }
 }
 
 /// 供应商管理器
