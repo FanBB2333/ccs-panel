@@ -351,13 +351,14 @@ impl Database {
                         Self::migrate_v0_to_v1(conn)?;
                         Self::set_user_version(conn, 1)?;
                     }
-                    1 => {
-                        log::info!(
-                            "迁移数据库从 v1 到 v2（添加使用统计表和完整字段，重构 skills 表）"
-                        );
-                        Self::migrate_v1_to_v2(conn)?;
-                        Self::set_user_version(conn, 2)?;
-                    }
+                    // v1->v2 迁移已禁用，保持与原版 cc-switch 兼容
+                    // 1 => {
+                    //     log::info!(
+                    //         "迁移数据库从 v1 到 v2（添加使用统计表和完整字段，重构 skills 表）"
+                    //     );
+                    //     Self::migrate_v1_to_v2(conn)?;
+                    //     Self::set_user_version(conn, 2)?;
+                    // }
                     _ => {
                         return Err(AppError::Database(format!(
                             "未知的数据库版本 {version}，无法迁移到 {SCHEMA_VERSION}"
