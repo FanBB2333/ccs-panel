@@ -619,7 +619,7 @@ function App() {
 
       <main
         className={`flex-1 overflow-y-auto pb-12 animate-fade-in scroll-overlay ${
-          isOnServerHome ? "pt-24" : currentView === "providers" ? "pt-28" : "pt-20"
+          isOnServerHome ? "pt-24" : currentView === "providers" ? "pt-32" : "pt-20"
         }`}
         style={{ overflowX: "hidden" }}
       >
