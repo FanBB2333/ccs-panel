@@ -102,4 +102,15 @@ export const sshApi = {
   ): Promise<void> => {
     return invoke("ssh_switch_remote_provider", { serverId, providerId, appType });
   },
+
+  /**
+   * 删除远程供应商
+   */
+  deleteRemoteProvider: async (
+    serverId: string,
+    providerId: string,
+    appType: string
+  ): Promise<void> => {
+    return invoke("ssh_delete_remote_provider", { serverId, providerId, appType });
+  },
 };

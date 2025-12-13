@@ -93,25 +93,32 @@ export const useUpdateProviderMutation = (appId: AppId) => {
   });
 };
 
-export const useDeleteProviderMutation = (appId: AppId) => {
+export const useDeleteProviderMutation = (appId: AppId, server?: ManagedServer | null) => {
   const queryClient = useQueryClient();
   const { t } = useTranslation();
 
   return useMutation({
     mutationFn: async (providerId: string) => {
-      await providersApi.delete(providerId, appId);
+      if (server && !server.isLocal && server.connectionType === "ssh") {
+        await sshApi.deleteRemoteProvider(server.id, providerId, appId);
+      } else {
+        await providersApi.delete(providerId, appId);
+      }
     },
     onSuccess: async () => {
-      await queryClient.invalidateQueries({ queryKey: ["providers", appId] });
+      const queryKey = ["providers", appId, server?.id || "local"];
+      await queryClient.invalidateQueries({ queryKey });
 
-      // 更新托盘菜单（失败不影响主操作）
-      try {
-        await providersApi.updateTrayMenu();
-      } catch (trayError) {
-        console.error(
-          "Failed to update tray menu after deleting provider",
-          trayError,
-        );
+      // 仅本地模式更新托盘菜单（失败不影响主操作）
+      if (!server || server.isLocal) {
+        try {
+          await providersApi.updateTrayMenu();
+        } catch (trayError) {
+          console.error(
+            "Failed to update tray menu after deleting provider",
+            trayError,
+          );
+        }
       }
 
       toast.success(

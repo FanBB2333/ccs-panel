@@ -181,6 +181,21 @@ pub async fn ssh_switch_remote_provider(
         .map_err(ssh_error_to_string)
 }
 
+/// 删除远程供应商
+#[tauri::command]
+pub async fn ssh_delete_remote_provider(
+    state: State<'_, AppState>,
+    server_id: String,
+    provider_id: String,
+    app_type: String,
+) -> Result<(), String> {
+    state
+        .ssh_service
+        .delete_remote_provider(&server_id, &provider_id, &app_type)
+        .await
+        .map_err(ssh_error_to_string)
+}
+
 /// 启动 SSH 端口转发
 #[tauri::command]
 pub async fn ssh_start_port_forwarding(
