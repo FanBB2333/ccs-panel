@@ -93,6 +93,17 @@ export const sshApi = {
   },
 
   /**
+   * 更新远程供应商
+   */
+  updateRemoteProvider: async (
+    serverId: string,
+    provider: unknown,
+    appType: string
+  ): Promise<void> => {
+    return invoke("ssh_update_remote_provider", { serverId, provider, appType });
+  },
+
+  /**
    * 切换远程供应商（设置当前供应商）
    */
   switchRemoteProvider: async (

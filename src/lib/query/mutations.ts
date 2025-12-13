@@ -62,17 +62,22 @@ export const useAddProviderMutation = (appId: AppId, server?: ManagedServer | nu
   });
 };
 
-export const useUpdateProviderMutation = (appId: AppId) => {
+export const useUpdateProviderMutation = (appId: AppId, server?: ManagedServer | null) => {
   const queryClient = useQueryClient();
   const { t } = useTranslation();
 
   return useMutation({
     mutationFn: async (provider: Provider) => {
-      await providersApi.update(provider, appId);
+      if (server && !server.isLocal && server.connectionType === "ssh") {
+        await sshApi.updateRemoteProvider(server.id, provider, appId);
+      } else {
+        await providersApi.update(provider, appId);
+      }
       return provider;
     },
     onSuccess: async () => {
-      await queryClient.invalidateQueries({ queryKey: ["providers", appId] });
+      const queryKey = ["providers", appId, server?.id || "local"];
+      await queryClient.invalidateQueries({ queryKey });
       toast.success(
         t("notifications.updateSuccess", {
           defaultValue: "供应商更新成功",

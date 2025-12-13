@@ -25,7 +25,7 @@ export function useProviderActions(activeApp: AppId) {
   const { currentServer } = useServer();
 
   const addProviderMutation = useAddProviderMutation(activeApp, currentServer);
-  const updateProviderMutation = useUpdateProviderMutation(activeApp);
+  const updateProviderMutation = useUpdateProviderMutation(activeApp, currentServer);
   const deleteProviderMutation = useDeleteProviderMutation(activeApp, currentServer);
   const switchProviderMutation = useSwitchProviderMutation(activeApp, currentServer);
 
