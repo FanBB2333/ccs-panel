@@ -46,9 +46,10 @@ impl ProxyService {
         use std::net::TcpListener;
 
         // 尝试绑定端口0，系统会自动分配一个可用端口
-        let listener = TcpListener::bind("127.0.0.1:0")
-            .map_err(|e| format!("无法分配端口: {}", e))?;
-        let port = listener.local_addr()
+        let listener =
+            TcpListener::bind("127.0.0.1:0").map_err(|e| format!("无法分配端口: {}", e))?;
+        let port = listener
+            .local_addr()
             .map_err(|e| format!("无法获取分配的端口: {}", e))?
             .port();
         drop(listener);
@@ -145,19 +146,26 @@ impl ProxyService {
         }
 
         // 如果是远程服务器，需要SSH服务支持
+
         if let Some(ref sid) = server_id {
-            let ssh_service = self.ssh_service.as_ref()
+            let ssh_service = self
+                .ssh_service
+                .as_ref()
                 .ok_or_else(|| "远程服务器代理需要SSH服务支持".to_string())?;
 
             log::info!("[ProxyService] 为远程服务器 {} 启动 SSH 转发代理", sid);
 
             // 1. 获取当前选中的 Claude Provider
-            let provider_id = self.db.get_current_provider("claude")
+            let provider_id = self
+                .db
+                .get_current_provider("claude")
                 .ok()
                 .flatten()
                 .ok_or_else(|| "未选中 Claude Provider".to_string())?;
 
-            let provider = self.db.get_provider_by_id(&provider_id, "claude")
+            let provider = self
+                .db
+                .get_provider_by_id(&provider_id, "claude")
                 .map_err(|e| format!("获取 Provider 失败: {}", e))?
                 .ok_or_else(|| "Provider 不存在".to_string())?;
 
@@ -175,9 +183,16 @@ impl ProxyService {
 
             // 5. 启动 SSH 远程端口转发
             // ssh -R remote_port:api_host:api_port
-            log::info!("[ProxyService] 启动 SSH 转发: 远程:{} -> {}", remote_port, target_address);
+            log::info!(
+                "[ProxyService] 启动 SSH 转发: 远程:{} -> {}",
+                remote_port,
+                target_address
+            );
 
-            match ssh_service.start_remote_port_forwarding_to_target(sid, remote_port, &target_address).await {
+            match ssh_service
+                .start_remote_port_forwarding_to_target(sid, remote_port, &target_address)
+                .await
+            {
                 Ok(status) => {
                     log::info!("[ProxyService] SSH端口转发已启动: {:?}", status);
 
@@ -196,7 +211,10 @@ impl ProxyService {
                     // 6. 修改远程配置文件，指向转发的端口
                     // 根据原始 URL 的协议决定使用 http 还是 https
                     let is_https = base_url.starts_with("https://");
-                    if let Err(e) = self.update_remote_configs_for_direct_proxy(sid, remote_port, is_https).await {
+                    if let Err(e) = self
+                        .update_remote_configs_for_direct_proxy(sid, remote_port, is_https)
+                        .await
+                    {
                         log::error!("[ProxyService] 更新远程配置失败: {}", e);
                         // 清理已启动的服务
                         let _ = ssh_service.stop_port_forwarding(sid).await;
@@ -222,7 +240,10 @@ impl ProxyService {
     }
 
     /// 从 Provider 配置中提取 ANTHROPIC_BASE_URL
-    fn extract_base_url_from_provider(&self, provider: &crate::provider::Provider) -> Result<String, String> {
+    fn extract_base_url_from_provider(
+        &self,
+        provider: &crate::provider::Provider,
+    ) -> Result<String, String> {
         // 1. 从 env 中获取
         if let Some(env) = provider.settings_config.get("env") {
             if let Some(url) = env.get("ANTHROPIC_BASE_URL").and_then(|v| v.as_str()) {
@@ -233,14 +254,22 @@ impl ProxyService {
         }
 
         // 2. 尝试直接获取 base_url
-        if let Some(url) = provider.settings_config.get("base_url").and_then(|v| v.as_str()) {
+        if let Some(url) = provider
+            .settings_config
+            .get("base_url")
+            .and_then(|v| v.as_str())
+        {
             if !url.is_empty() {
                 return Ok(url.trim_end_matches('/').to_string());
             }
         }
 
         // 3. 尝试 baseURL
-        if let Some(url) = provider.settings_config.get("baseURL").and_then(|v| v.as_str()) {
+        if let Some(url) = provider
+            .settings_config
+            .get("baseURL")
+            .and_then(|v| v.as_str())
+        {
             if !url.is_empty() {
                 return Ok(url.trim_end_matches('/').to_string());
             }
@@ -254,18 +283,16 @@ impl ProxyService {
     fn parse_url_to_host_port(&self, url: &str) -> Result<String, String> {
         use url::Url;
 
-        let parsed = Url::parse(url)
-            .map_err(|e| format!("无效的 URL: {}", e))?;
+        let parsed = Url::parse(url).map_err(|e| format!("无效的 URL: {}", e))?;
 
-        let host = parsed.host_str()
+        let host = parsed
+            .host_str()
             .ok_or_else(|| "URL 缺少主机名".to_string())?;
 
-        let port = parsed.port().unwrap_or_else(|| {
-            match parsed.scheme() {
-                "https" => 443,
-                "http" => 80,
-                _ => 443,
-            }
+        let port = parsed.port().unwrap_or_else(|| match parsed.scheme() {
+            "https" => 443,
+            "http" => 80,
+            _ => 443,
         });
 
         Ok(format!("{}:{}", host, port))
@@ -280,7 +307,9 @@ impl ProxyService {
         forward_port: u16,
         _is_https: bool,
     ) -> Result<(), String> {
-        let ssh_service = self.ssh_service.as_ref()
+        let ssh_service = self
+            .ssh_service
+            .as_ref()
             .ok_or_else(|| "SSH服务未初始化".to_string())?;
 
         // 注意：SSH -R 转发的是 TCP 连接，远程访问时使用 http://127.0.0.1:port
@@ -291,7 +320,8 @@ impl ProxyService {
         log::info!("[ProxyService] 更新远程配置文件，指向 {}", proxy_url);
 
         // 只更新 Claude 配置
-        let update_script = format!(r#"
+        let update_script = format!(
+            r#"
             mkdir -p ~/.claude
             SETTINGS=~/.claude/settings.json
             if [ -f "$SETTINGS" ]; then
@@ -324,7 +354,9 @@ print('updated_with_python')
                 echo '{{"env":{{"ANTHROPIC_BASE_URL":"{}"}}}}' > "$SETTINGS"
                 echo "created_new"
             fi
-        "#, proxy_url, proxy_url, proxy_url);
+        "#,
+            proxy_url, proxy_url, proxy_url
+        );
 
         match ssh_service.execute(server_id, &update_script).await {
             Ok(result) => {
@@ -347,7 +379,9 @@ print('updated_with_python')
         };
 
         if let Some(ref sid) = server_id {
-            let ssh_service = self.ssh_service.as_ref()
+            let ssh_service = self
+                .ssh_service
+                .as_ref()
                 .ok_or_else(|| "远程服务器代理需要SSH服务支持".to_string())?;
 
             log::info!("[ProxyService] 停止远程服务器 {} 的代理", sid);
@@ -394,10 +428,15 @@ print('updated_with_python')
         server_id: &str,
         forward_port: u16,
     ) -> Result<(), String> {
-        let ssh_service = self.ssh_service.as_ref()
+        let ssh_service = self
+            .ssh_service
+            .as_ref()
             .ok_or_else(|| "SSH服务未初始化".to_string())?;
 
-        log::info!("[ProxyService] 更新远程配置文件，指向127.0.0.1:{}", forward_port);
+        log::info!(
+            "[ProxyService] 更新远程配置文件，指向127.0.0.1:{}",
+            forward_port
+        );
 
         let proxy_url = format!("http://127.0.0.1:{}", forward_port);
         let app_types = ["claude", "codex", "gemini"];
@@ -406,7 +445,8 @@ print('updated_with_python')
             let update_script = match app_type {
                 "claude" => {
                     // 更新 ~/.claude/settings.json
-                    format!(r#"
+                    format!(
+                        r#"
                         mkdir -p ~/.claude
                         SETTINGS=~/.claude/settings.json
                         if [ -f "$SETTINGS" ]; then
@@ -420,11 +460,14 @@ print('updated_with_python')
                                 echo '{{\"env\":{{\"ANTHROPIC_BASE_URL\":\"{}\"}}}}' > "$SETTINGS"
                             fi
                         fi
-                    "#, proxy_url, proxy_url)
+                    "#,
+                        proxy_url, proxy_url
+                    )
                 }
                 "codex" => {
                     // 更新 ~/.codex/auth.json
-                    format!(r#"
+                    format!(
+                        r#"
                         mkdir -p ~/.codex
                         AUTH=~/.codex/auth.json
                         if [ -f "$AUTH" ]; then
@@ -433,11 +476,14 @@ print('updated_with_python')
                                 jq '.OPENAI_BASE_URL = "{}"' "$AUTH" > "$AUTH.tmp" && mv "$AUTH.tmp" "$AUTH"
                             fi
                         fi
-                    "#, proxy_url)
+                    "#,
+                        proxy_url
+                    )
                 }
                 "gemini" => {
                     // 更新 ~/.gemini/.env
-                    format!(r#"
+                    format!(
+                        r#"
                         mkdir -p ~/.gemini
                         ENV=~/.gemini/.env
                         if [ -f "$ENV" ]; then
@@ -448,7 +494,9 @@ print('updated_with_python')
                                 echo "GEMINI_API_BASE={}" >> "$ENV"
                             fi
                         fi
-                    "#, proxy_url, proxy_url)
+                    "#,
+                        proxy_url, proxy_url
+                    )
                 }
                 _ => continue,
             };
@@ -465,7 +513,9 @@ print('updated_with_python')
 
     /// 恢复远程服务器的配置文件
     async fn restore_remote_configs(&self, server_id: &str) -> Result<(), String> {
-        let ssh_service = self.ssh_service.as_ref()
+        let ssh_service = self
+            .ssh_service
+            .as_ref()
             .ok_or_else(|| "SSH服务未初始化".to_string())?;
 
         log::info!("[ProxyService] 恢复远程配置文件");
@@ -474,33 +524,30 @@ print('updated_with_python')
 
         for app_type in app_types {
             let restore_script = match app_type {
-                "claude" => {
-                    r#"
+                "claude" => r#"
                         SETTINGS=~/.claude/settings.json
                         if [ -f "$SETTINGS.proxy_backup" ]; then
                             mv "$SETTINGS.proxy_backup" "$SETTINGS"
                             echo "restored"
                         fi
-                    "#.to_string()
-                }
-                "codex" => {
-                    r#"
+                    "#
+                .to_string(),
+                "codex" => r#"
                         AUTH=~/.codex/auth.json
                         if [ -f "$AUTH.proxy_backup" ]; then
                             mv "$AUTH.proxy_backup" "$AUTH"
                             echo "restored"
                         fi
-                    "#.to_string()
-                }
-                "gemini" => {
-                    r#"
+                    "#
+                .to_string(),
+                "gemini" => r#"
                         ENV=~/.gemini/.env
                         if [ -f "$ENV.proxy_backup" ]; then
                             mv "$ENV.proxy_backup" "$ENV"
                             echo "restored"
                         fi
-                    "#.to_string()
-                }
+                    "#
+                .to_string(),
                 _ => continue,
             };
 
