@@ -713,6 +713,7 @@ pub fn run() {
             commands::ssh_read_remote_config,
             commands::ssh_execute,
             commands::ssh_add_remote_provider,
+            commands::ssh_switch_remote_provider,
         ]);
 
     let app = builder

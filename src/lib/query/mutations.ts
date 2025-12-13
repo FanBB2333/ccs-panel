@@ -134,25 +134,32 @@ export const useDeleteProviderMutation = (appId: AppId) => {
   });
 };
 
-export const useSwitchProviderMutation = (appId: AppId) => {
+export const useSwitchProviderMutation = (appId: AppId, server?: ManagedServer | null) => {
   const queryClient = useQueryClient();
   const { t } = useTranslation();
 
   return useMutation({
     mutationFn: async (providerId: string) => {
-      return await providersApi.switch(providerId, appId);
+      if (server && !server.isLocal && server.connectionType === "ssh") {
+        await sshApi.switchRemoteProvider(server.id, providerId, appId);
+      } else {
+        await providersApi.switch(providerId, appId);
+      }
     },
     onSuccess: async () => {
-      await queryClient.invalidateQueries({ queryKey: ["providers", appId] });
+      const queryKey = ["providers", appId, server?.id || "local"];
+      await queryClient.invalidateQueries({ queryKey });
 
-      // 更新托盘菜单（失败不影响主操作）
-      try {
-        await providersApi.updateTrayMenu();
-      } catch (trayError) {
-        console.error(
-          "Failed to update tray menu after switching provider",
-          trayError,
-        );
+      // 仅本地模式更新托盘菜单（失败不影响主操作）
+      if (!server || server.isLocal) {
+        try {
+          await providersApi.updateTrayMenu();
+        } catch (trayError) {
+          console.error(
+            "Failed to update tray menu after switching provider",
+            trayError,
+          );
+        }
       }
 
       toast.success(

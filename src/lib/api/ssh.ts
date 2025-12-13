@@ -91,4 +91,15 @@ export const sshApi = {
   ): Promise<void> => {
     return invoke("ssh_add_remote_provider", { serverId, provider, appType });
   },
+
+  /**
+   * 切换远程供应商（设置当前供应商）
+   */
+  switchRemoteProvider: async (
+    serverId: string,
+    providerId: string,
+    appType: string
+  ): Promise<void> => {
+    return invoke("ssh_switch_remote_provider", { serverId, providerId, appType });
+  },
 };

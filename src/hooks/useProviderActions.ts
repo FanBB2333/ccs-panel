@@ -27,7 +27,7 @@ export function useProviderActions(activeApp: AppId) {
   const addProviderMutation = useAddProviderMutation(activeApp, currentServer);
   const updateProviderMutation = useUpdateProviderMutation(activeApp);
   const deleteProviderMutation = useDeleteProviderMutation(activeApp);
-  const switchProviderMutation = useSwitchProviderMutation(activeApp);
+  const switchProviderMutation = useSwitchProviderMutation(activeApp, currentServer);
 
   // Claude 插件同步逻辑
   const syncClaudePlugin = useCallback(

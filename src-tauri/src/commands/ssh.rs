@@ -165,3 +165,18 @@ pub async fn ssh_add_remote_provider(
         .await
         .map_err(ssh_error_to_string)
 }
+
+/// 切换远程供应商（设置当前供应商）
+#[tauri::command]
+pub async fn ssh_switch_remote_provider(
+    state: State<'_, AppState>,
+    server_id: String,
+    provider_id: String,
+    app_type: String,
+) -> Result<(), String> {
+    state
+        .ssh_service
+        .set_remote_current_provider(&server_id, &provider_id, &app_type)
+        .await
+        .map_err(ssh_error_to_string)
+}

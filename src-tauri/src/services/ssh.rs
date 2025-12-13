@@ -794,18 +794,57 @@ impl SshService {
     }
 
     /// 设置远程当前供应商
+    ///
+    /// 与本地切换 provider 类似：
+    /// 1. 更新数据库中的 is_current 字段
+    /// 2. 将 provider 的 settings_config 写入远程的 live 配置文件
     pub async fn set_remote_current_provider(
         &self,
         server_id: &str,
         provider_id: &str,
         app_type: &str,
     ) -> Result<(), SshError> {
-        log::info!("[set_remote_current_provider] Starting for server: {}, provider: {}", server_id, provider_id);
+        log::info!("[set_remote_current_provider] Starting for server: {}, provider: {}, app_type: {}", server_id, provider_id, app_type);
 
         let sqlite3_path = self.check_remote_sqlite3(server_id).await;
         let remote_db_path = self.resolve_db_path(server_id).await;
 
-        if let Some(sqlite3) = sqlite3_path {
+        // Step 1: Get provider's settings_config from remote database
+        let settings_config: serde_json::Value = if let Some(ref sqlite3) = sqlite3_path {
+            // Use remote sqlite3 to query settings_config
+            let sql_escape = |s: &str| s.replace("'", "''");
+            let sql = format!(
+                "SELECT settings_config FROM providers WHERE id='{}' AND app_type='{}'",
+                sql_escape(provider_id),
+                app_type
+            );
+            let cmd = format!("{} \"{}\" '{}'", sqlite3, remote_db_path, sql.replace("'", "'\\''"));
+            let result = self.execute(server_id, &cmd).await?;
+            let trimmed = result.trim();
+            if trimmed.is_empty() {
+                return Err(SshError::InvalidConfig(format!("Provider {} not found", provider_id)));
+            }
+            serde_json::from_str(trimmed).unwrap_or(serde_json::Value::Null)
+        } else {
+            // Download DB and query locally
+            let temp_dir = tempfile::tempdir().map_err(|e| SshError::FileReadFailed(e.to_string()))?;
+            let local_path = temp_dir.path().join("cc-switch.db");
+            self.download_file(server_id, &remote_db_path, &local_path).await?;
+
+            let conn = rusqlite::Connection::open(&local_path).map_err(|e| SshError::FileReadFailed(e.to_string()))?;
+            let settings_config_str: String = conn.query_row(
+                "SELECT settings_config FROM providers WHERE id=?1 AND app_type=?2",
+                rusqlite::params![provider_id, app_type],
+                |row| row.get(0),
+            ).map_err(|e| SshError::InvalidConfig(format!("Provider {} not found: {}", provider_id, e)))?;
+
+            serde_json::from_str(&settings_config_str).unwrap_or(serde_json::Value::Null)
+        };
+
+        log::info!("[set_remote_current_provider] Got settings_config for provider {}", provider_id);
+
+        // Step 2: Update is_current in database
+        if let Some(ref sqlite3) = sqlite3_path {
             let sql_escape = |s: &str| s.replace("'", "''");
             // 先重置所有为 0，再设置指定的为 1
             let sql = format!(
@@ -814,7 +853,7 @@ impl SshService {
                 sql_escape(provider_id),
                 app_type
             );
-            self.execute(server_id, &format!("{} \"{}\" '{}'", sqlite3, remote_db_path, sql.replace("'", "'\\''"))).await.map(|_| ())
+            self.execute(server_id, &format!("{} \"{}\" '{}'", sqlite3, remote_db_path, sql.replace("'", "'\\''"))).await?;
         } else {
             let temp_dir = tempfile::tempdir().map_err(|e| SshError::FileReadFailed(e.to_string()))?;
             let local_path = temp_dir.path().join("cc-switch.db");
@@ -836,9 +875,101 @@ impl SshService {
             drop(conn);
 
             self.upload_file(server_id, &local_path, &remote_db_path).await?;
-
-            Ok(())
         }
+
+        // Step 3: Write settings_config to remote live config file
+        self.write_remote_live_config(server_id, app_type, &settings_config).await?;
+
+        log::info!("[set_remote_current_provider] Successfully switched provider {} on server {}", provider_id, server_id);
+        Ok(())
+    }
+
+    /// 将 settings_config 写入远程的 live 配置文件
+    async fn write_remote_live_config(
+        &self,
+        server_id: &str,
+        app_type: &str,
+        settings_config: &serde_json::Value,
+    ) -> Result<(), SshError> {
+        log::info!("[write_remote_live_config] Writing live config for app_type: {}", app_type);
+
+        match app_type {
+            "claude" => {
+                // Claude: Write to ~/.claude/settings.json
+                let config_json = serde_json::to_string_pretty(settings_config)
+                    .map_err(|e| SshError::InvalidConfig(format!("Failed to serialize config: {}", e)))?;
+
+                // Create directory if not exists
+                self.execute(server_id, "mkdir -p ~/.claude").await?;
+
+                // Write config using heredoc to handle special characters
+                let cmd = format!(
+                    "cat > ~/.claude/settings.json << 'EOFCONFIG'\n{}\nEOFCONFIG",
+                    config_json
+                );
+                self.execute(server_id, &cmd).await?;
+                log::info!("[write_remote_live_config] Wrote Claude settings.json");
+            }
+            "codex" => {
+                // Codex: Write auth.json and config.md separately
+                let obj = settings_config.as_object().ok_or_else(|| {
+                    SshError::InvalidConfig("Codex config must be a JSON object".to_string())
+                })?;
+
+                // Write auth.json
+                if let Some(auth) = obj.get("auth") {
+                    let auth_json = serde_json::to_string_pretty(auth)
+                        .map_err(|e| SshError::InvalidConfig(format!("Failed to serialize auth: {}", e)))?;
+
+                    self.execute(server_id, "mkdir -p ~/.codex").await?;
+                    let cmd = format!(
+                        "cat > ~/.codex/auth.json << 'EOFCONFIG'\n{}\nEOFCONFIG",
+                        auth_json
+                    );
+                    self.execute(server_id, &cmd).await?;
+                    log::info!("[write_remote_live_config] Wrote Codex auth.json");
+                }
+
+                // Write config (config.md or similar)
+                if let Some(config) = obj.get("config").and_then(|v| v.as_str()) {
+                    self.execute(server_id, "mkdir -p ~/.codex").await?;
+                    let cmd = format!(
+                        "cat > ~/.codex/config.md << 'EOFCONFIG'\n{}\nEOFCONFIG",
+                        config
+                    );
+                    self.execute(server_id, &cmd).await?;
+                    log::info!("[write_remote_live_config] Wrote Codex config.md");
+                }
+            }
+            "gemini" => {
+                // Gemini: Write .env file
+                // settings_config should contain the env content as a string or structured data
+                let env_content = if let Some(s) = settings_config.as_str() {
+                    s.to_string()
+                } else if let Some(obj) = settings_config.as_object() {
+                    // Convert object to env format
+                    obj.iter()
+                        .filter_map(|(k, v)| v.as_str().map(|val| format!("{}={}", k, val)))
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                } else {
+                    return Err(SshError::InvalidConfig("Gemini config format not recognized".to_string()));
+                };
+
+                self.execute(server_id, "mkdir -p ~/.gemini").await?;
+                let cmd = format!(
+                    "cat > ~/.gemini/.env << 'EOFCONFIG'\n{}\nEOFCONFIG",
+                    env_content
+                );
+                self.execute(server_id, &cmd).await?;
+                log::info!("[write_remote_live_config] Wrote Gemini .env");
+            }
+            _ => {
+                log::warn!("[write_remote_live_config] Unknown app_type: {}", app_type);
+            }
+        }
+
+        Ok(())
     }
 
     /// 设置远程代理目标供应商
