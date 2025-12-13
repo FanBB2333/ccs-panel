@@ -160,6 +160,7 @@ export function ServerProvider({ children }: { children: React.ReactNode }) {
           password: server.sshConfig.password,
           private_key_path: server.sshConfig.privateKeyPath,
           passphrase: server.sshConfig.passphrase,
+          sqlite3_path: server.sshConfig.sqlite3Path,
         };
 
         await sshApi.connect(request);
@@ -218,6 +219,7 @@ export function ServerProvider({ children }: { children: React.ReactNode }) {
           password: server.sshConfig.password,
           private_key_path: server.sshConfig.privateKeyPath,
           passphrase: server.sshConfig.passphrase,
+          sqlite3_path: server.sshConfig.sqlite3Path,
         };
 
         const result = await sshApi.testConnection(request);

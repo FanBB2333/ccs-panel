@@ -16,6 +16,9 @@ pub struct SshConnectRequest {
     pub password: Option<String>,
     pub private_key_path: Option<String>,
     pub passphrase: Option<String>,
+    /// 远程 sqlite3 可执行文件路径（可选）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sqlite3_path: Option<String>,
 }
 
 impl From<&SshConnectRequest> for SshConfig {
@@ -32,6 +35,7 @@ impl From<&SshConnectRequest> for SshConfig {
             password: req.password.clone(),
             private_key_path: req.private_key_path.clone(),
             passphrase: req.passphrase.clone(),
+            sqlite3_path: req.sqlite3_path.clone(),
         }
     }
 }

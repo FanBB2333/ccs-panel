@@ -12,6 +12,8 @@ export interface SshConnectRequest {
   password?: string;
   private_key_path?: string;
   passphrase?: string;
+  /** 远程 sqlite3 可执行文件路径（可选） */
+  sqlite3_path?: string;
 }
 
 /**

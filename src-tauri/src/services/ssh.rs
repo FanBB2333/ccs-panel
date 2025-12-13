@@ -45,6 +45,9 @@ pub struct SshConfig {
     pub password: Option<String>,
     pub private_key_path: Option<String>,
     pub passphrase: Option<String>,
+    /// 远程 sqlite3 可执行文件路径（可选，如 /usr/bin/sqlite3 或 /home/user/.local/bin/sqlite3）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sqlite3_path: Option<String>,
 }
 
 /// 远程服务器信息
@@ -79,6 +82,8 @@ pub struct SshService {
     connections: Arc<RwLock<HashMap<String, Client>>>,
     /// 连接状态 (server_id -> status)
     status: Arc<RwLock<HashMap<String, ConnectionStatus>>>,
+    /// 服务器配置 (server_id -> config)
+    configs: Arc<RwLock<HashMap<String, SshConfig>>>,
 }
 
 impl SshService {
@@ -86,6 +91,7 @@ impl SshService {
         Self {
             connections: Arc::new(RwLock::new(HashMap::new())),
             status: Arc::new(RwLock::new(HashMap::new())),
+            configs: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -166,6 +172,12 @@ impl SshService {
             connections.insert(server_id.to_string(), client);
         }
 
+        // 保存配置（用于后续获取 sqlite3_path 等信息）
+        {
+            let mut configs = self.configs.write().await;
+            configs.insert(server_id.to_string(), config.clone());
+        }
+
         // 设置已连接状态
         {
             let mut status = self.status.write().await;
@@ -181,6 +193,10 @@ impl SshService {
         {
             let mut connections = self.connections.write().await;
             connections.remove(server_id);
+        }
+        {
+            let mut configs = self.configs.write().await;
+            configs.remove(server_id);
         }
         {
             let mut status = self.status.write().await;
@@ -225,12 +241,64 @@ impl SshService {
         self.execute(server_id, &format!("cat {}", path)).await
     }
 
-    /// 检查远程是否安装了 sqlite3
-    async fn check_remote_sqlite3_installed(&self, server_id: &str) -> bool {
-        match self.execute(server_id, "which sqlite3").await {
-            Ok(_) => true,
-            Err(_) => false,
+    /// 获取有效的 sqlite3 可执行路径
+    /// 如果配置了自定义路径且可用，返回自定义路径；否则尝试系统默认路径
+    async fn get_sqlite3_path(&self, server_id: &str) -> Option<String> {
+        // 首先检查配置中是否有自定义路径
+        let custom_path = {
+            let configs = self.configs.read().await;
+            configs.get(server_id).and_then(|c| c.sqlite3_path.clone())
+        };
+
+        if let Some(path) = custom_path {
+            if !path.is_empty() {
+                // 验证自定义路径是否可用
+                let check_cmd = format!("test -x '{}' && echo 'ok'", path);
+                if let Ok(output) = self.execute(server_id, &check_cmd).await {
+                    if output.trim() == "ok" {
+                        log::info!("[get_sqlite3_path] Using custom sqlite3 path: {}", path);
+                        return Some(path);
+                    } else {
+                        log::warn!("[get_sqlite3_path] Custom sqlite3 path not executable: {}", path);
+                    }
+                }
+            }
         }
+
+        // 尝试系统默认路径
+        if let Ok(output) = self.execute(server_id, "which sqlite3").await {
+            let system_path = output.trim().to_string();
+            if !system_path.is_empty() {
+                log::info!("[get_sqlite3_path] Using system sqlite3 path: {}", system_path);
+                return Some(system_path);
+            }
+        }
+
+        // 尝试常见的 sqlite3 路径
+        let common_paths = [
+            "/usr/bin/sqlite3",
+            "/usr/local/bin/sqlite3",
+            "/opt/homebrew/bin/sqlite3",
+            "~/.local/bin/sqlite3",
+        ];
+
+        for path in &common_paths {
+            let check_cmd = format!("test -x '{}' && echo 'ok'", path);
+            if let Ok(output) = self.execute(server_id, &check_cmd).await {
+                if output.trim() == "ok" {
+                    log::info!("[get_sqlite3_path] Found sqlite3 at: {}", path);
+                    return Some(path.to_string());
+                }
+            }
+        }
+
+        log::warn!("[get_sqlite3_path] No sqlite3 found on remote server: {}", server_id);
+        None
+    }
+
+    /// 检查远程是否安装了 sqlite3（返回路径或 None）
+    async fn check_remote_sqlite3(&self, server_id: &str) -> Option<String> {
+        self.get_sqlite3_path(server_id).await
     }
 
     /// 确保远程目录存在
@@ -238,8 +306,10 @@ impl SshService {
         let parent = std::path::Path::new(remote_path).parent();
         if let Some(parent_path) = parent {
             if let Some(parent_str) = parent_path.to_str() {
-                // 简单的 mkdir -p
-                self.execute(server_id, &format!("mkdir -p '{}'", parent_str)).await?;
+                // 使用双引号而不是单引号，这样 ~ 可以被 shell 正确展开
+                // 注意：双引号内的特殊字符（如 $）仍会被展开，但对于路径来说这通常是期望的行为
+                log::info!("[ensure_remote_dir] Creating directory: {}", parent_str);
+                self.execute(server_id, &format!("mkdir -p \"{}\"", parent_str)).await?;
             }
         }
         Ok(())
@@ -249,11 +319,12 @@ impl SshService {
     /// 使用 cat + base64 方式 (假设远程有 cat 和 base64，如果没有 base64 则直接 cat，但需注意二进制安全)
     /// 为通用性，先尝试 base64，如果失败尝试直接 cat
     async fn download_file(&self, server_id: &str, remote_path: &str, local_path: &PathBuf) -> Result<(), SshError> {
-        let content_base64 = match self.execute(server_id, &format!("cat '{}' | base64", remote_path)).await {
+        // 使用双引号以便 ~ 展开
+        let content_base64 = match self.execute(server_id, &format!("cat \"{}\" | base64", remote_path)).await {
             Ok(output) => output,
             Err(_) => {
                  // 尝试直接读取 (可能不安全，但作为备选)
-                 self.execute(server_id, &format!("cat '{}'", remote_path)).await?
+                 self.execute(server_id, &format!("cat \"{}\"", remote_path)).await?
             }
         };
 
@@ -282,20 +353,11 @@ impl SshService {
         use base64::Engine;
         let b64 = base64::engine::general_purpose::STANDARD.encode(bytes);
 
-        // 分块上传可能太复杂，这里假设文件不大，直接 echo
-        // 注意命令行长度限制。如果文件大，需要 scp/sftp。这里暂且用 cat <<EOF > file 方式
-        // 或者 echo "..." | base64 -d > file
-        
-        // 检查远程是否有 base64 -d 或 base64 --decode
-        // Linux generic: base64 -d
-        // Mac: base64 -D (有些版本)
-        // 尝试通用: python/perl? 不，太重。
-        // 我们假设 standard linux environment
-        
-        let cmd = format!("echo '{}' | base64 -d > '{}'", b64, remote_path);
+        // 使用双引号以便 ~ 展开
+        // echo 的内容使用单引号（不需要展开），输出路径使用双引号
+        let cmd = format!("echo '{}' | base64 -d > \"{}\"", b64, remote_path);
         
         // 如果文件太大，cmd length 会爆。Config DB 通常很小。
-        // CCS Panel config db 一般只有几KB到几十KB。
         if cmd.len() > 100_000 {
             return Err(SshError::CommandFailed("File too large for shell transfer".to_string()));
         }
@@ -308,16 +370,26 @@ impl SshService {
     async fn find_existing_db_path(&self, server_id: &str) -> Option<String> {
          let db_paths = vec![
             "~/.config/cc-switch/cc-switch.db",
-            "~/Library/Application\\ Support/cc-switch/cc-switch.db",
+            "~/Library/Application Support/cc-switch/cc-switch.db",
             "~/.local/share/cc-switch/cc-switch.db",
         ];
 
         for path in &db_paths {
-            let check_cmd = format!("ls -d {}", path);
-            if let Ok(result) = self.execute(server_id, &check_cmd).await {
-                let trimmed = result.trim();
-                if !trimmed.is_empty() && !trimmed.contains("No such file") {
-                    return Some(trimmed.to_string());
+            // 使用双引号：~ 会被展开，空格也能正确处理
+            let check_cmd = format!("ls \"{}\" 2>/dev/null", path);
+            log::info!("[find_existing_db_path] Checking: {}", path);
+            
+            match self.execute(server_id, &check_cmd).await {
+                Ok(result) => {
+                    let trimmed = result.trim();
+                    log::info!("[find_existing_db_path] OK: '{}'", trimmed);
+                    if !trimmed.is_empty() {
+                        return Some(trimmed.to_string());
+                    }
+                }
+                Err(e) => {
+                    // ls 找不到文件会返回 exit code 1 或 2
+                    log::info!("[find_existing_db_path] Not found at {}: {:?}", path, e);
                 }
             }
         }
@@ -340,38 +412,48 @@ impl SshService {
         app_type: &str,
     ) -> Result<RemoteConfig, SshError> {
 
-        // 1. 检查 sqlite3
-        if self.check_remote_sqlite3_installed(server_id).await {
+        // 1. 检查 sqlite3 是否可用（返回路径或 None）
+        if let Some(sqlite3_path) = self.check_remote_sqlite3(server_id).await {
             let db_path = self.resolve_db_path(server_id).await;
 
             // 检查文件是否存在，如果不存在直接返回默认空配置
-            if self.find_existing_db_path(server_id).await.is_none() {
+            let existing_path = self.find_existing_db_path(server_id).await;
+            if existing_path.is_none() {
+                 log::warn!("[read_remote_config] No existing DB found, returning empty config");
                  return Ok(RemoteConfig {
                     providers: serde_json::Value::Array(vec![]),
                     current_provider_id: None,
                     proxy_target_provider_id: None,
                 });
             }
+            log::info!("[read_remote_config] Found DB at: {:?}", existing_path);
 
             // Query with all fields matching local database structure
              let query = format!(
-                "sqlite3 '{}' \"SELECT json_group_array(json_object('id', id, 'name', name, 'app_type', app_type, 'settingsConfig', settings_config, 'websiteUrl', website_url, 'category', category, 'createdAt', created_at, 'sortIndex', sort_index, 'notes', notes, 'icon', icon, 'iconColor', icon_color, 'meta', meta, 'isCurrent', is_current, 'isProxyTarget', is_proxy_target)) FROM providers WHERE app_type = '{}'\"",
-                db_path, app_type
+                "{} \"{}\" \"SELECT json_group_array(json_object('id', id, 'name', name, 'app_type', app_type, 'settingsConfig', settings_config, 'websiteUrl', website_url, 'category', category, 'createdAt', created_at, 'sortIndex', sort_index, 'notes', notes, 'icon', icon, 'iconColor', icon_color, 'meta', meta, 'isCurrent', is_current, 'isProxyTarget', is_proxy_target)) FROM providers WHERE app_type = '{}'\"",
+                sqlite3_path, db_path, app_type
             );
+
+            log::info!("[read_remote_config] Executing query: {}", query);
 
             match self.execute(server_id, &query).await {
                 Ok(providers_json) => {
-                     let providers: serde_json::Value = serde_json::from_str(&providers_json).unwrap_or(serde_json::Value::Array(vec![]));
-
+                    log::info!("[read_remote_config] Raw JSON from remote: {}", providers_json);
+                    
+                     let providers: serde_json::Value = serde_json::from_str(&providers_json).map_err(|e| {
+                         log::error!("[read_remote_config] JSON parse error: {}. Content: {}", e, providers_json);
+                         SshError::FileReadFailed(format!("Failed to parse providers JSON from remote: {}", e))
+                     })?;
+                     
                      let current_query = format!(
-                        "sqlite3 '{}' \"SELECT id FROM providers WHERE app_type = '{}' AND is_current = 1 LIMIT 1\"",
-                        db_path, app_type
+                        "{} \"{}\" \"SELECT id FROM providers WHERE app_type = '{}' AND is_current = 1 LIMIT 1\"",
+                        sqlite3_path, db_path, app_type
                     );
                     let current_id = self.execute(server_id, &current_query).await.ok().map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
 
                     let proxy_target_query = format!(
-                        "sqlite3 '{}' \"SELECT id FROM providers WHERE app_type = '{}' AND is_proxy_target = 1 LIMIT 1\"",
-                        db_path, app_type
+                        "{} \"{}\" \"SELECT id FROM providers WHERE app_type = '{}' AND is_proxy_target = 1 LIMIT 1\"",
+                        sqlite3_path, db_path, app_type
                     );
                     let proxy_target_id = self.execute(server_id, &proxy_target_query).await.ok().map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
 
@@ -381,7 +463,8 @@ impl SshService {
                         proxy_target_provider_id: proxy_target_id,
                     });
                 }
-                Err(_) => {
+                Err(e) => {
+                    log::error!("[read_remote_config] SQL execution failed: {}", e);
                     // 如果 SQL 执行失败，可能是表不存在等，返回空
                     return Ok(RemoteConfig {
                         providers: serde_json::Value::Array(vec![]),
@@ -462,7 +545,7 @@ impl SshService {
     ) -> Result<(), SshError> {
         log::info!("[add_remote_provider] Starting for server: {}", server_id);
 
-        let remote_sqlite3_exists = self.check_remote_sqlite3_installed(server_id).await;
+        let sqlite3_path = self.check_remote_sqlite3(server_id).await;
         let remote_db_path = self.resolve_db_path(server_id).await;
 
         // 准备 SQL 参数 - 完全匹配本地数据库结构
@@ -480,11 +563,11 @@ impl SshService {
         let meta = provider["meta"].to_string();
         let is_proxy_target = provider["isProxyTarget"].as_bool().unwrap_or(false);
 
-        if remote_sqlite3_exists {
-             // ... existing sqlite3 remote command logic ...
+        if let Some(sqlite3) = sqlite3_path {
+             // 使用远程 sqlite3 执行命令
              // We use 'ensure_remote_dir' first to be safe
              self.ensure_remote_dir(server_id, &remote_db_path).await?;
-             
+
             // Create schema if needed - matching local database structure exactly
              let create_table_sql = r#"CREATE TABLE IF NOT EXISTS providers (
                 id TEXT NOT NULL,
@@ -503,7 +586,7 @@ impl SshService {
                 is_proxy_target INTEGER NOT NULL DEFAULT 0,
                 PRIMARY KEY (id, app_type)
             )"#;
-            self.execute(server_id, &format!("sqlite3 '{}' \"{}\"", remote_db_path, create_table_sql)).await?;
+            self.execute(server_id, &format!("{} \"{}\" \"{}\"", sqlite3, remote_db_path, create_table_sql)).await?;
 
             // Create provider_endpoints table - matching local structure
             let create_endpoints_sql = r#"CREATE TABLE IF NOT EXISTS provider_endpoints (
@@ -514,7 +597,7 @@ impl SshService {
                 added_at INTEGER,
                 FOREIGN KEY (provider_id, app_type) REFERENCES providers(id, app_type) ON DELETE CASCADE
             )"#;
-            self.execute(server_id, &format!("sqlite3 '{}' \"{}\"", remote_db_path, create_endpoints_sql)).await?;
+            self.execute(server_id, &format!("{} \"{}\" \"{}\"", sqlite3, remote_db_path, create_endpoints_sql)).await?;
 
             // Insert - matching local database structure
              let sql_escape = |s: &str| s.replace("'", "''");
@@ -534,7 +617,9 @@ impl SshService {
                 sql_escape(&meta),
                 if is_proxy_target { 1 } else { 0 }
             );
-             self.execute(server_id, &format!("sqlite3 '{}' '{}'", remote_db_path, sql.replace("'", "'\\''"))).await.map(|_| ())
+            // 对于 SQL 语句，我们需要用单引号包裹并转义内部的单引号
+            // 但是 db_path 使用双引号以便 ~ 展开
+             self.execute(server_id, &format!("{} \"{}\" '{}'", sqlite3, remote_db_path, sql.replace("'", "'\\''"))).await.map(|_| ())
         } else {
              // Fallback: Download -> modify -> upload
              log::info!("[add_remote_provider] sqlite3 missing, swapping to local modify mode");
@@ -611,7 +696,7 @@ impl SshService {
     ) -> Result<(), SshError> {
         log::info!("[update_remote_provider] Starting for server: {}", server_id);
 
-        let remote_sqlite3_exists = self.check_remote_sqlite3_installed(server_id).await;
+        let sqlite3_path = self.check_remote_sqlite3(server_id).await;
         let remote_db_path = self.resolve_db_path(server_id).await;
 
         // 准备 SQL 参数
@@ -626,7 +711,7 @@ impl SshService {
         let notes = provider["notes"].as_str().map(|s| s.to_string());
         let meta = provider["meta"].to_string();
 
-        if remote_sqlite3_exists {
+        if let Some(sqlite3) = sqlite3_path {
             let sql_escape = |s: &str| s.replace("'", "''");
             let sql = format!(
                 "UPDATE providers SET name='{}', settings_config='{}', website_url={}, category={}, sort_index={}, notes={}, icon={}, icon_color={}, meta='{}' WHERE id='{}' AND app_type='{}'",
@@ -642,7 +727,7 @@ impl SshService {
                 sql_escape(&id),
                 app_type
             );
-            self.execute(server_id, &format!("sqlite3 '{}' '{}'", remote_db_path, sql.replace("'", "'\\''"))).await.map(|_| ())
+            self.execute(server_id, &format!("{} \"{}\" '{}'", sqlite3, remote_db_path, sql.replace("'", "'\\''"))).await.map(|_| ())
         } else {
             // Fallback: Download -> modify -> upload
             log::info!("[update_remote_provider] sqlite3 missing, using local modify mode");
@@ -676,17 +761,17 @@ impl SshService {
     ) -> Result<(), SshError> {
         log::info!("[delete_remote_provider] Starting for server: {}, provider: {}", server_id, provider_id);
 
-        let remote_sqlite3_exists = self.check_remote_sqlite3_installed(server_id).await;
+        let sqlite3_path = self.check_remote_sqlite3(server_id).await;
         let remote_db_path = self.resolve_db_path(server_id).await;
 
-        if remote_sqlite3_exists {
+        if let Some(sqlite3) = sqlite3_path {
             let sql_escape = |s: &str| s.replace("'", "''");
             let sql = format!(
                 "DELETE FROM providers WHERE id='{}' AND app_type='{}'",
                 sql_escape(provider_id),
                 app_type
             );
-            self.execute(server_id, &format!("sqlite3 '{}' '{}'", remote_db_path, sql.replace("'", "'\\''"))).await.map(|_| ())
+            self.execute(server_id, &format!("{} \"{}\" '{}'", sqlite3, remote_db_path, sql.replace("'", "'\\''"))).await.map(|_| ())
         } else {
             let temp_dir = tempfile::tempdir().map_err(|e| SshError::FileReadFailed(e.to_string()))?;
             let local_path = temp_dir.path().join("cc-switch.db");
@@ -717,10 +802,10 @@ impl SshService {
     ) -> Result<(), SshError> {
         log::info!("[set_remote_current_provider] Starting for server: {}, provider: {}", server_id, provider_id);
 
-        let remote_sqlite3_exists = self.check_remote_sqlite3_installed(server_id).await;
+        let sqlite3_path = self.check_remote_sqlite3(server_id).await;
         let remote_db_path = self.resolve_db_path(server_id).await;
 
-        if remote_sqlite3_exists {
+        if let Some(sqlite3) = sqlite3_path {
             let sql_escape = |s: &str| s.replace("'", "''");
             // 先重置所有为 0，再设置指定的为 1
             let sql = format!(
@@ -729,7 +814,7 @@ impl SshService {
                 sql_escape(provider_id),
                 app_type
             );
-            self.execute(server_id, &format!("sqlite3 '{}' '{}'", remote_db_path, sql.replace("'", "'\\''"))).await.map(|_| ())
+            self.execute(server_id, &format!("{} \"{}\" '{}'", sqlite3, remote_db_path, sql.replace("'", "'\\''"))).await.map(|_| ())
         } else {
             let temp_dir = tempfile::tempdir().map_err(|e| SshError::FileReadFailed(e.to_string()))?;
             let local_path = temp_dir.path().join("cc-switch.db");
@@ -766,10 +851,10 @@ impl SshService {
     ) -> Result<(), SshError> {
         log::info!("[set_remote_proxy_target] Starting for server: {}, provider: {}, enabled: {}", server_id, provider_id, enabled);
 
-        let remote_sqlite3_exists = self.check_remote_sqlite3_installed(server_id).await;
+        let sqlite3_path = self.check_remote_sqlite3(server_id).await;
         let remote_db_path = self.resolve_db_path(server_id).await;
 
-        if remote_sqlite3_exists {
+        if let Some(sqlite3) = sqlite3_path {
             let sql_escape = |s: &str| s.replace("'", "''");
             let sql = format!(
                 "UPDATE providers SET is_proxy_target={} WHERE id='{}' AND app_type='{}'",
@@ -777,7 +862,7 @@ impl SshService {
                 sql_escape(provider_id),
                 app_type
             );
-            self.execute(server_id, &format!("sqlite3 '{}' '{}'", remote_db_path, sql.replace("'", "'\\''"))).await.map(|_| ())
+            self.execute(server_id, &format!("{} \"{}\" '{}'", sqlite3, remote_db_path, sql.replace("'", "'\\''"))).await.map(|_| ())
         } else {
             let temp_dir = tempfile::tempdir().map_err(|e| SshError::FileReadFailed(e.to_string()))?;
             let local_path = temp_dir.path().join("cc-switch.db");

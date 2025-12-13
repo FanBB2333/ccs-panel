@@ -32,6 +32,7 @@ const sortProviders = (
 
 /**
  * 将远程返回的 JSON 数据转换为 Provider 格式
+ * 支持 camelCase 和 snake_case 两种格式
  */
 const parseRemoteProviders = (
   remoteData: unknown
@@ -45,21 +46,32 @@ const parseRemoteProviders = (
 
   for (const item of remoteData) {
     try {
-      // 远程数据使用 snake_case，需要转换
+      // 支持 camelCase 和 snake_case 两种格式
+      const settingsConfigRaw = item.settingsConfig ?? item.settings_config;
       const provider: Provider = {
         id: item.id,
         name: item.name,
-        settingsConfig: typeof item.settings_config === "string"
-          ? JSON.parse(item.settings_config)
-          : item.settings_config || {},
-        websiteUrl: item.website_url,
+        settingsConfig: typeof settingsConfigRaw === "string"
+          ? JSON.parse(settingsConfigRaw)
+          : settingsConfigRaw || {},
+        websiteUrl: item.websiteUrl ?? item.website_url,
         category: item.category,
-        createdAt: item.created_at,
-        sortIndex: item.sort_index,
+        createdAt: item.createdAt ?? item.created_at,
+        sortIndex: item.sortIndex ?? item.sort_index,
+        notes: item.notes,
         icon: item.icon,
-        iconColor: item.icon_color,
-        isProxyTarget: item.is_proxy_target,
+        iconColor: item.iconColor ?? item.icon_color,
+        isProxyTarget: item.isProxyTarget ?? item.is_proxy_target,
       };
+
+      // 处理 meta 字段
+      if (item.meta) {
+        const metaRaw = typeof item.meta === "string" ? JSON.parse(item.meta) : item.meta;
+        if (metaRaw && typeof metaRaw === "object") {
+          provider.meta = metaRaw;
+        }
+      }
+
       result[provider.id] = provider;
     } catch (error) {
       console.error("[parseRemoteProviders] Failed to parse provider:", item, error);

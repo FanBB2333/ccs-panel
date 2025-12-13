@@ -13,6 +13,8 @@ export interface SSHConfig {
   password?: string;
   privateKeyPath?: string;
   passphrase?: string;
+  /** 远程 sqlite3 可执行文件路径（可选，如 /usr/bin/sqlite3） */
+  sqlite3Path?: string;
 }
 
 // 服务器状态

@@ -1,6 +1,6 @@
 import { useState, useCallback, useEffect } from "react";
 import { useTranslation } from "react-i18next";
-import { Server, Key, Lock, Eye, EyeOff, FolderOpen } from "lucide-react";
+import { Server, Key, Lock, Eye, EyeOff, FolderOpen, Database } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -32,6 +32,7 @@ export function AddServerDialog({
   const [password, setPassword] = useState("");
   const [privateKeyPath, setPrivateKeyPath] = useState("");
   const [passphrase, setPassphrase] = useState("");
+  const [sqlite3Path, setSqlite3Path] = useState("");
   const [showPassword, setShowPassword] = useState(false);
   const [showPassphrase, setShowPassphrase] = useState(false);
 
@@ -46,6 +47,7 @@ export function AddServerDialog({
       setPassword(editingServer.sshConfig?.password || "");
       setPrivateKeyPath(editingServer.sshConfig?.privateKeyPath || "");
       setPassphrase(editingServer.sshConfig?.passphrase || "");
+      setSqlite3Path(editingServer.sshConfig?.sqlite3Path || "");
     } else {
       // 重置表单
       setName("");
@@ -56,6 +58,7 @@ export function AddServerDialog({
       setPassword("");
       setPrivateKeyPath("");
       setPassphrase("");
+      setSqlite3Path("");
     }
     setShowPassword(false);
     setShowPassphrase(false);
@@ -90,6 +93,7 @@ export function AddServerDialog({
               privateKeyPath: privateKeyPath.trim(),
               passphrase: passphrase.trim() || undefined,
             }),
+        sqlite3Path: sqlite3Path.trim() || undefined,
       },
     };
 
@@ -105,6 +109,7 @@ export function AddServerDialog({
     password,
     privateKeyPath,
     passphrase,
+    sqlite3Path,
     onSubmit,
     onOpenChange,
   ]);
@@ -319,6 +324,30 @@ export function AddServerDialog({
               </div>
             </>
           )}
+
+          {/* SQLite3 路径（高级选项） */}
+          <div className="space-y-2">
+            <Label htmlFor="sqlite3-path" className="flex items-center gap-2">
+              <Database className="h-4 w-4" />
+              {t("server.form.sqlite3Path", {
+                defaultValue: "SQLite3 路径（可选）",
+              })}
+            </Label>
+            <Input
+              id="sqlite3-path"
+              value={sqlite3Path}
+              onChange={(e) => setSqlite3Path(e.target.value)}
+              placeholder={t("server.form.sqlite3PathPlaceholder", {
+                defaultValue: "/usr/bin/sqlite3",
+              })}
+            />
+            <p className="text-xs text-muted-foreground">
+              {t("server.form.sqlite3PathHint", {
+                defaultValue:
+                  "如果远程服务器的 sqlite3 不在 PATH 中，可以指定完整路径。留空则自动检测。",
+              })}
+            </p>
+          </div>
         </div>
 
         {/* 提示信息 */}
