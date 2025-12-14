@@ -34,7 +34,7 @@ export function ServerDirectorySettings({
 
   return (
     <section className="space-y-4">
-      {/* <header className="space-y-1">
+      <header className="space-y-1">
         <h3 className="text-sm font-medium">
           {t("settings.remoteConfigDirectory", {
             defaultValue: "远程配置目录",
@@ -46,13 +46,13 @@ export function ServerDirectorySettings({
               "设置远程服务器上 Claude、Codex 和 Gemini 的配置文件路径。留空则使用默认路径。",
           })}
         </p>
-      </header> */}
+      </header>
 
       <RemoteDirectoryInput
         label={t("settings.claudeConfigDir")}
         value={configDirs.claudeConfigDir}
         placeholder={t("settings.remotePlaceholderClaude", {
-          defaultValue: "~/.claude（默认）",
+          defaultValue: "~/.claude(default)",
         })}
         onChange={(val) => handleChange("claudeConfigDir", val)}
         onReset={() => handleReset("claudeConfigDir")}
@@ -62,7 +62,7 @@ export function ServerDirectorySettings({
         label={t("settings.codexConfigDir")}
         value={configDirs.codexConfigDir}
         placeholder={t("settings.remotePlaceholderCodex", {
-          defaultValue: "~/.codex（默认）",
+          defaultValue: "~/.codex(default)",
         })}
         onChange={(val) => handleChange("codexConfigDir", val)}
         onReset={() => handleReset("codexConfigDir")}
@@ -72,7 +72,7 @@ export function ServerDirectorySettings({
         label={t("settings.geminiConfigDir")}
         value={configDirs.geminiConfigDir}
         placeholder={t("settings.remotePlaceholderGemini", {
-          defaultValue: "~/.gemini（默认）",
+          defaultValue: "~/.gemini(default)",
         })}
         onChange={(val) => handleChange("geminiConfigDir", val)}
         onReset={() => handleReset("geminiConfigDir")}
