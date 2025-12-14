@@ -840,5 +840,47 @@
   },
   "agents": {
     "title": "智能体"
+  },
+  "server": {
+    "title": "服务器管理",
+    "subtitle": "选择一个服务器来管理其配置",
+    "add": "添加服务器",
+    "addTitle": "添加服务器",
+    "editTitle": "编辑服务器",
+    "localServer": "本地服务器",
+    "localDescription": "本机",
+    "disconnect": "断开连接",
+    "status": {
+      "connected": "已连接",
+      "disconnected": "未连接",
+      "connecting": "连接中...",
+      "error": "连接错误"
+    },
+    "settings": {
+      "title": "服务器管理设置",
+      "displayLanguage": "外部显示语言",
+      "displayLanguageHint": "控制对外展示内容（如错误信息、API 响应等）使用的语言",
+      "languageOptionSimplifiedChinese": "简体中文",
+      "languageOptionEnglish": "English"
+    },
+    "form": {
+      "name": "服务器名称",
+      "namePlaceholder": "例如：生产服务器",
+      "sshConfig": "SSH 连接配置",
+      "host": "主机地址",
+      "port": "端口",
+      "username": "用户名",
+      "authType": "认证方式",
+      "passwordAuth": "密码认证",
+      "keyAuth": "密钥认证",
+      "password": "密码",
+      "privateKeyPath": "私钥文件路径",
+      "passphrase": "密钥密码（可选）",
+      "passphrasePlaceholder": "如果密钥有密码请输入",
+      "sqlite3Path": "SQLite3 路径（可选）",
+      "sqlite3PathPlaceholder": "/usr/bin/sqlite3",
+      "sqlite3PathHint": "如果远程服务器的 sqlite3 不在 PATH 中，可以指定完整路径。留空则自动检测。",
+      "hint": "添加远程服务器后，您可以管理该服务器上的配置文件。请确保 SSH 连接信息正确。"
+    }
   }
 }

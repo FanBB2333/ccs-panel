@@ -840,5 +840,47 @@
   },
   "agents": {
     "title": "Agents"
+  },
+  "server": {
+    "title": "Server Management",
+    "subtitle": "Select a server to manage its configuration",
+    "add": "Add Server",
+    "addTitle": "Add Server",
+    "editTitle": "Edit Server",
+    "localServer": "Local Server",
+    "localDescription": "Local",
+    "disconnect": "Disconnect",
+    "status": {
+      "connected": "Connected",
+      "disconnected": "Disconnected",
+      "connecting": "Connecting...",
+      "error": "Connection Error"
+    },
+    "settings": {
+      "title": "Server Management Settings",
+      "displayLanguage": "Display Language",
+      "displayLanguageHint": "Control the language used for external content (e.g., error messages, API responses)",
+      "languageOptionSimplifiedChinese": "简体中文",
+      "languageOptionEnglish": "English"
+    },
+    "form": {
+      "name": "Server Name",
+      "namePlaceholder": "e.g., Production Server",
+      "sshConfig": "SSH Connection",
+      "host": "Host",
+      "port": "Port",
+      "username": "Username",
+      "authType": "Auth Type",
+      "passwordAuth": "Password",
+      "keyAuth": "Private Key",
+      "password": "Password",
+      "privateKeyPath": "Private Key Path",
+      "passphrase": "Passphrase (Optional)",
+      "passphrasePlaceholder": "Enter if key is encrypted",
+      "sqlite3Path": "SQLite3 Path (Optional)",
+      "sqlite3PathPlaceholder": "/usr/bin/sqlite3",
+      "sqlite3PathHint": "If sqlite3 is not in PATH on the remote server, specify the full path. Leave empty for auto-detection.",
+      "hint": "After adding a remote server, you can manage its configuration files. Please ensure SSH connection details are correct."
+    }
   }
 }

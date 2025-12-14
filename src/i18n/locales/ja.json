@@ -840,5 +840,47 @@
   },
   "agents": {
     "title": "エージェント"
+  },
+  "server": {
+    "title": "サーバー管理",
+    "subtitle": "サーバーを選択して設定を管理",
+    "add": "サーバーを追加",
+    "addTitle": "サーバーを追加",
+    "editTitle": "サーバーを編集",
+    "localServer": "ローカルサーバー",
+    "localDescription": "ローカル",
+    "disconnect": "切断",
+    "status": {
+      "connected": "接続済み",
+      "disconnected": "未接続",
+      "connecting": "接続中...",
+      "error": "接続エラー"
+    },
+    "settings": {
+      "title": "サーバー管理設定",
+      "displayLanguage": "表示言語",
+      "displayLanguageHint": "外部コンテンツ（エラーメッセージ、API レスポンスなど）に使用する言語を設定",
+      "languageOptionSimplifiedChinese": "简体中文",
+      "languageOptionEnglish": "English"
+    },
+    "form": {
+      "name": "サーバー名",
+      "namePlaceholder": "例：本番サーバー",
+      "sshConfig": "SSH 接続設定",
+      "host": "ホスト",
+      "port": "ポート",
+      "username": "ユーザー名",
+      "authType": "認証方式",
+      "passwordAuth": "パスワード認証",
+      "keyAuth": "鍵認証",
+      "password": "パスワード",
+      "privateKeyPath": "秘密鍵パス",
+      "passphrase": "パスフレーズ（任意）",
+      "passphrasePlaceholder": "鍵にパスワードがある場合は入力",
+      "sqlite3Path": "SQLite3 パス（任意）",
+      "sqlite3PathPlaceholder": "/usr/bin/sqlite3",
+      "sqlite3PathHint": "リモートサーバーで sqlite3 が PATH にない場合、フルパスを指定できます。空欄で自動検出。",
+      "hint": "リモートサーバーを追加すると、設定ファイルを管理できます。SSH 接続情報が正しいことを確認してください。"
+    }
   }
 }

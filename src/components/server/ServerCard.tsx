@@ -131,7 +131,9 @@ export function ServerCard({
 
       {/* 服务器名称 */}
       <h3 className="text-lg font-semibold text-foreground mb-1 truncate">
-        {server.name}
+        {isLocal
+          ? t("server.localServer", { defaultValue: "本地服务器" })
+          : server.name}
       </h3>
 
       {/* 连接信息 */}
