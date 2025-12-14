@@ -21,6 +21,7 @@ import { LanguageSettings } from "@/components/settings/LanguageSettings";
 import { ThemeSettings } from "@/components/settings/ThemeSettings";
 import { WindowSettings } from "@/components/settings/WindowSettings";
 import { DirectorySettings } from "@/components/settings/DirectorySettings";
+import { ServerDirectorySettings } from "@/components/settings/ServerDirectorySettings";
 import { ImportExportSection } from "@/components/settings/ImportExportSection";
 import { AboutSection } from "@/components/settings/AboutSection";
 // TODO: Proxy 功能开发中，暂时不需要
@@ -39,6 +40,7 @@ import type { SettingsFormState } from "@/hooks/useSettings";
 // import { useProxyStatus } from "@/hooks/useProxyStatus";
 import { Switch } from "@/components/ui/switch";
 import { useServer } from "@/contexts/ServerContext";
+import type { RemoteConfigDirs } from "@/types/server";
 
 interface SettingsDialogProps {
   open: boolean;
@@ -52,9 +54,8 @@ export function SettingsPage({
   onImportSuccess,
 }: SettingsDialogProps) {
   const { t } = useTranslation();
-  // TODO: Proxy 功能开发中，暂时不需要
-  // const { currentServer, currentServerId } = useServer();
-  void useServer(); // Keep the hook call for future use
+  const { currentServer, updateServer } = useServer();
+  const isRemoteServer = currentServer && !currentServer.isLocal;
   const {
     settings,
     isLoading,
@@ -180,6 +181,18 @@ export function SettingsPage({
   // } = useProxyStatus({ serverId: currentServerId });
   const [failoverEnabled, setFailoverEnabled] = useState(true);
 
+  // 处理远程服务器配置目录变更
+  const handleServerConfigDirsChange = useCallback(
+    (dirs: RemoteConfigDirs) => {
+      if (!currentServer || currentServer.isLocal) return;
+      updateServer({
+        ...currentServer,
+        configDirs: dirs,
+      });
+    },
+    [currentServer, updateServer]
+  );
+
   // const handleToggleProxy = async (checked: boolean) => {
   //   try {
   //     if (!checked) {
@@ -260,19 +273,26 @@ export function SettingsPage({
                         </div>
                       </AccordionTrigger>
                       <AccordionContent className="px-6 pb-6 pt-4 border-t border-border/50">
-                        <DirectorySettings
-                          appConfigDir={appConfigDir}
-                          resolvedDirs={resolvedDirs}
-                          onAppConfigChange={updateAppConfigDir}
-                          onBrowseAppConfig={browseAppConfigDir}
-                          onResetAppConfig={resetAppConfigDir}
-                          claudeDir={settings.claudeConfigDir}
-                          codexDir={settings.codexConfigDir}
-                          geminiDir={settings.geminiConfigDir}
-                          onDirectoryChange={updateDirectory}
-                          onBrowseDirectory={browseDirectory}
-                          onResetDirectory={resetDirectory}
-                        />
+                        {isRemoteServer ? (
+                          <ServerDirectorySettings
+                            configDirs={currentServer.configDirs ?? {}}
+                            onConfigDirsChange={handleServerConfigDirsChange}
+                          />
+                        ) : (
+                          <DirectorySettings
+                            appConfigDir={appConfigDir}
+                            resolvedDirs={resolvedDirs}
+                            onAppConfigChange={updateAppConfigDir}
+                            onBrowseAppConfig={browseAppConfigDir}
+                            onResetAppConfig={resetAppConfigDir}
+                            claudeDir={settings.claudeConfigDir}
+                            codexDir={settings.codexConfigDir}
+                            geminiDir={settings.geminiConfigDir}
+                            onDirectoryChange={updateDirectory}
+                            onBrowseDirectory={browseDirectory}
+                            onResetDirectory={resetDirectory}
+                          />
+                        )}
                       </AccordionContent>
                     </AccordionItem>
 

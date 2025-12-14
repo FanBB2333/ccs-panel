@@ -20,6 +20,13 @@ export interface SSHConfig {
 // 服务器状态
 export type ServerStatus = "connected" | "disconnected" | "connecting" | "error";
 
+// 远程服务器配置目录（用于覆盖默认路径）
+export interface RemoteConfigDirs {
+  claudeConfigDir?: string;
+  codexConfigDir?: string;
+  geminiConfigDir?: string;
+}
+
 // 服务器配置
 export interface ManagedServer {
   id: string;
@@ -31,6 +38,8 @@ export interface ManagedServer {
   createdAt: number;
   // 本地服务器标记
   isLocal?: boolean;
+  // 远程服务器配置目录（仅对远程服务器有效）
+  configDirs?: RemoteConfigDirs;
 }
 
 // 服务器列表
