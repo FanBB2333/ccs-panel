@@ -139,6 +139,8 @@ impl ProxyService {
         &self,
         server_id: Option<String>,
     ) -> Result<ProxyServerInfo, String> {
+        log::info!("[ProxyService] start_with_takeover_for_server called with server_id: {:?}", server_id);
+
         // 保存当前服务器ID
         {
             let mut current_id = self.current_server_id.write().await;
@@ -146,8 +148,8 @@ impl ProxyService {
         }
 
         // 如果是远程服务器，需要SSH服务支持
-
         if let Some(ref sid) = server_id {
+            log::info!("[ProxyService] Remote server mode detected, server_id = {}", sid);
             let ssh_service = self
                 .ssh_service
                 .as_ref()
@@ -235,6 +237,7 @@ impl ProxyService {
             }
         } else {
             // 本地服务器，直接启动代理
+            log::info!("[ProxyService] Local server mode detected, calling start_with_takeover()");
             self.start_with_takeover().await
         }
     }

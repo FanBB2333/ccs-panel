@@ -29,6 +29,7 @@ pub async fn start_proxy_with_takeover_for_server(
     state: tauri::State<'_, AppState>,
     server_id: Option<String>,
 ) -> Result<ProxyServerInfo, String> {
+    log::info!("[ProxyCommand] start_proxy_with_takeover_for_server called with server_id: {:?}", server_id);
     state.proxy_service.start_with_takeover_for_server(server_id).await
 }
 

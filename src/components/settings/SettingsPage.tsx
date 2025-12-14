@@ -57,7 +57,7 @@ export function SettingsPage({
   onImportSuccess,
 }: SettingsDialogProps) {
   const { t } = useTranslation();
-  const { currentServer } = useServer();
+  const { currentServer, currentServerId } = useServer();
   const {
     settings,
     isLoading,
@@ -179,7 +179,7 @@ export function SettingsPage({
     startWithTakeover: startProxy,
     stopWithRestore: stopProxy,
     isPending: isProxyPending,
-  } = useProxyStatus();
+  } = useProxyStatus({ serverId: currentServerId });
   const [failoverEnabled, setFailoverEnabled] = useState(true);
 
   const handleToggleProxy = async (checked: boolean) => {

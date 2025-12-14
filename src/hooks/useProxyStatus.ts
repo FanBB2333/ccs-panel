@@ -6,6 +6,7 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { invoke } from "@tauri-apps/api/core";
 import { toast } from "sonner";
 import { useTranslation } from "react-i18next";
+import { useRef, useEffect } from "react";
 import type { ProxyStatus, ProxyServerInfo } from "@/types/proxy";
 import { extractErrorMessage } from "@/utils/errorUtils";
 
@@ -24,6 +25,16 @@ export function useProxyStatus(options: UseProxyStatusOptions = {}) {
   const { serverId } = options;
   // 判断是否为远程服务器（serverId 存在且不为 "local"）
   const isRemoteServer = serverId != null && serverId !== "local";
+
+  // 使用 ref 来保存最新的 serverId，避免闭包捕获旧值
+  const serverIdRef = useRef(serverId);
+  const isRemoteServerRef = useRef(isRemoteServer);
+
+  // 每次渲染时更新 ref
+  useEffect(() => {
+    serverIdRef.current = serverId;
+    isRemoteServerRef.current = isRemoteServer;
+  });
 
   const queryClient = useQueryClient();
   const { t } = useTranslation();
@@ -48,18 +59,25 @@ export function useProxyStatus(options: UseProxyStatusOptions = {}) {
   // 根据是否为远程服务器调用不同的后端命令
   const startWithTakeoverMutation = useMutation({
     mutationFn: () => {
-      if (isRemoteServer) {
+      // 使用 ref 获取最新的值，避免闭包捕获旧值
+      const currentServerId = serverIdRef.current;
+      const currentIsRemoteServer = isRemoteServerRef.current;
+
+      console.log("[useProxyStatus] startWithTakeover called, serverId:", currentServerId, "isRemoteServer:", currentIsRemoteServer);
+      if (currentIsRemoteServer) {
         // 远程服务器模式：启动本地代理 + SSH 端口转发 + 修改远程配置
+        console.log("[useProxyStatus] Calling start_proxy_with_takeover_for_server with serverId:", currentServerId);
         return invoke<ProxyServerInfo>("start_proxy_with_takeover_for_server", {
-          server_id: serverId,
+          serverId: currentServerId,  // camelCase for Tauri
         });
       } else {
         // 本地模式
+        console.log("[useProxyStatus] Calling start_proxy_with_takeover (local mode)");
         return invoke<ProxyServerInfo>("start_proxy_with_takeover");
       }
     },
     onSuccess: (info) => {
-      const modeText = isRemoteServer ? "远程" : "本地";
+      const modeText = isRemoteServerRef.current ? "远程" : "本地";
       toast.success(
         t("proxy.startedWithTakeover", {
           defaultValue: `${modeText}代理模式已启用 - ${info.address}:${info.port}`,
@@ -82,7 +100,10 @@ export function useProxyStatus(options: UseProxyStatusOptions = {}) {
   // 根据是否为远程服务器调用不同的后端命令
   const stopWithRestoreMutation = useMutation({
     mutationFn: () => {
-      if (isRemoteServer) {
+      // 使用 ref 获取最新的值，避免闭包捕获旧值
+      const currentIsRemoteServer = isRemoteServerRef.current;
+
+      if (currentIsRemoteServer) {
         // 远程服务器模式：恢复远程配置 + 停止 SSH 端口转发 + 停止本地代理
         return invoke("stop_proxy_with_restore_for_server");
       } else {

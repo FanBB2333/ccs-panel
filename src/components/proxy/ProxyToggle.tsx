@@ -23,6 +23,8 @@ export function ProxyToggle({ className }: ProxyToggleProps) {
   // 获取当前选中的服务器
   const { currentServerId, currentServer } = useServer();
 
+  console.log("[ProxyToggle] Render - currentServerId:", currentServerId, "currentServer:", currentServer?.name);
+
   const {
     isRunning,
     isTakeoverActive,
@@ -33,7 +35,10 @@ export function ProxyToggle({ className }: ProxyToggleProps) {
     isRemoteServer,
   } = useProxyStatus({ serverId: currentServerId });
 
+  console.log("[ProxyToggle] useProxyStatus - isRemoteServer:", isRemoteServer);
+
   const handleToggle = async (checked: boolean) => {
+    console.log("[ProxyToggle] handleToggle called - checked:", checked, "currentServerId:", currentServerId);
     if (checked) {
       await startWithTakeover();
     } else {
