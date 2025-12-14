@@ -130,7 +130,12 @@ export const sshApi = {
    */
   saveServerSettings: async (
     serverId: string,
-    settings: { workingDir?: string }
+    settings: {
+      workingDir?: string;
+      claudeConfigDir?: string;
+      codexConfigDir?: string;
+      geminiConfigDir?: string;
+    }
   ): Promise<void> => {
     return invoke("save_server_settings", { serverId, settings });
   },
@@ -140,7 +145,12 @@ export const sshApi = {
    */
   getServerSettings: async (
     serverId: string
-  ): Promise<{ workingDir?: string }> => {
+  ): Promise<{
+    workingDir?: string;
+    claudeConfigDir?: string;
+    codexConfigDir?: string;
+    geminiConfigDir?: string;
+  }> => {
     return invoke("get_server_settings", { serverId });
   },
 };

@@ -20,51 +20,60 @@ export function ServerDirectorySettings({
 }: ServerDirectorySettingsProps) {
   const { t } = useTranslation();
   const [isSaving, setIsSaving] = useState(false);
-  const [localWorkingDir, setLocalWorkingDir] = useState(configDirs.workingDir ?? "");
+
+  // 本地状态管理所有目录
+  const [localDirs, setLocalDirs] = useState<RemoteConfigDirs>({
+    workingDir: configDirs.workingDir ?? "",
+    claudeConfigDir: configDirs.claudeConfigDir ?? "",
+    codexConfigDir: configDirs.codexConfigDir ?? "",
+    geminiConfigDir: configDirs.geminiConfigDir ?? "",
+  });
 
   // Sync local state when configDirs changes from external source
   useEffect(() => {
-    setLocalWorkingDir(configDirs.workingDir ?? "");
-  }, [configDirs.workingDir]);
+    setLocalDirs({
+      workingDir: configDirs.workingDir ?? "",
+      claudeConfigDir: configDirs.claudeConfigDir ?? "",
+      codexConfigDir: configDirs.codexConfigDir ?? "",
+      geminiConfigDir: configDirs.geminiConfigDir ?? "",
+    });
+  }, [configDirs]);
 
-  const handleSaveWorkingDir = useCallback(async () => {
+  const handleLocalChange = useCallback((key: keyof RemoteConfigDirs, value: string) => {
+    setLocalDirs(prev => ({
+      ...prev,
+      [key]: value,
+    }));
+  }, []);
+
+  const handleReset = useCallback((key: keyof RemoteConfigDirs) => {
+    setLocalDirs(prev => ({
+      ...prev,
+      [key]: "",
+    }));
+  }, []);
+
+  const handleSaveAll = useCallback(async () => {
     setIsSaving(true);
     try {
-      const workingDir = localWorkingDir.trim() || undefined;
-      await sshApi.saveServerSettings(serverId, { workingDir });
-      onConfigDirsChange({
-        ...configDirs,
-        workingDir,
-      });
-      toast.success(t("settings.workingDirSaved", { defaultValue: "工作目录已保存" }));
+      const settings = {
+        workingDir: localDirs.workingDir?.trim() || undefined,
+        claudeConfigDir: localDirs.claudeConfigDir?.trim() || undefined,
+        codexConfigDir: localDirs.codexConfigDir?.trim() || undefined,
+        geminiConfigDir: localDirs.geminiConfigDir?.trim() || undefined,
+      };
+
+      await sshApi.saveServerSettings(serverId, settings);
+
+      onConfigDirsChange(settings);
+      toast.success(t("settings.serverSettingsSaved", { defaultValue: "服务器设置已保存" }));
     } catch (error) {
-      console.error("[ServerDirectorySettings] Failed to save working dir:", error);
-      toast.error(t("settings.workingDirSaveFailed", { defaultValue: "保存工作目录失败" }));
+      console.error("[ServerDirectorySettings] Failed to save settings:", error);
+      toast.error(t("settings.serverSettingsSaveFailed", { defaultValue: "保存服务器设置失败" }));
     } finally {
       setIsSaving(false);
     }
-  }, [serverId, localWorkingDir, configDirs, onConfigDirsChange, t]);
-
-  const handleResetWorkingDir = useCallback(() => {
-    setLocalWorkingDir("");
-  }, []);
-
-  const handleChange = (
-    key: keyof RemoteConfigDirs,
-    value: string | undefined
-  ) => {
-    onConfigDirsChange({
-      ...configDirs,
-      [key]: value?.trim() || undefined,
-    });
-  };
-
-  const handleReset = (key: keyof RemoteConfigDirs) => {
-    onConfigDirsChange({
-      ...configDirs,
-      [key]: undefined,
-    });
-  };
+  }, [serverId, localDirs, onConfigDirsChange, t]);
 
   return (
     <section className="space-y-4">
@@ -83,36 +92,21 @@ export function ServerDirectorySettings({
         </p>
         <div className="flex items-center gap-2 mt-2">
           <Input
-            value={localWorkingDir}
+            value={localDirs.workingDir ?? ""}
             placeholder={t("settings.workingDirPlaceholder", {
               defaultValue: "~/.cc-switch/cc-switch.db (default)",
             })}
             className="text-xs"
-            onChange={(e) => setLocalWorkingDir(e.target.value)}
+            onChange={(e) => handleLocalChange("workingDir", e.target.value)}
           />
           <Button
             type="button"
             variant="outline"
             size="icon"
-            onClick={handleResetWorkingDir}
+            onClick={() => handleReset("workingDir")}
             title={t("settings.resetDefault")}
           >
             <Undo2 className="h-4 w-4" />
-          </Button>
-          <Button
-            type="button"
-            size="sm"
-            onClick={handleSaveWorkingDir}
-            disabled={isSaving}
-          >
-            {isSaving ? (
-              <Loader2 className="h-4 w-4 animate-spin" />
-            ) : (
-              <>
-                <Save className="h-4 w-4 mr-1" />
-                {t("common.save", { defaultValue: "保存" })}
-              </>
-            )}
           </Button>
         </div>
       </div>
@@ -134,33 +128,50 @@ export function ServerDirectorySettings({
 
       <RemoteDirectoryInput
         label={t("settings.claudeConfigDir")}
-        value={configDirs.claudeConfigDir}
+        value={localDirs.claudeConfigDir}
         placeholder={t("settings.remotePlaceholderClaude", {
-          defaultValue: "~/.claude(default)",
+          defaultValue: "~/.claude (default)",
         })}
-        onChange={(val) => handleChange("claudeConfigDir", val)}
+        onChange={(val) => handleLocalChange("claudeConfigDir", val ?? "")}
         onReset={() => handleReset("claudeConfigDir")}
       />
 
       <RemoteDirectoryInput
         label={t("settings.codexConfigDir")}
-        value={configDirs.codexConfigDir}
+        value={localDirs.codexConfigDir}
         placeholder={t("settings.remotePlaceholderCodex", {
-          defaultValue: "~/.codex(default)",
+          defaultValue: "~/.codex (default)",
         })}
-        onChange={(val) => handleChange("codexConfigDir", val)}
+        onChange={(val) => handleLocalChange("codexConfigDir", val ?? "")}
         onReset={() => handleReset("codexConfigDir")}
       />
 
       <RemoteDirectoryInput
         label={t("settings.geminiConfigDir")}
-        value={configDirs.geminiConfigDir}
+        value={localDirs.geminiConfigDir}
         placeholder={t("settings.remotePlaceholderGemini", {
-          defaultValue: "~/.gemini(default)",
+          defaultValue: "~/.gemini (default)",
         })}
-        onChange={(val) => handleChange("geminiConfigDir", val)}
+        onChange={(val) => handleLocalChange("geminiConfigDir", val ?? "")}
         onReset={() => handleReset("geminiConfigDir")}
       />
+
+      {/* 保存按钮 */}
+      <div className="pt-2">
+        <Button
+          type="button"
+          onClick={handleSaveAll}
+          disabled={isSaving}
+          className="w-full"
+        >
+          {isSaving ? (
+            <Loader2 className="h-4 w-4 animate-spin mr-2" />
+          ) : (
+            <Save className="h-4 w-4 mr-2" />
+          )}
+          {t("settings.saveServerSettings", { defaultValue: "保存服务器目录设置" })}
+        </Button>
+      </div>
     </section>
   );
 }

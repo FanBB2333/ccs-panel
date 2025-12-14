@@ -19,6 +19,15 @@ pub struct ServerSettings {
     /// 工作目录（远程数据库路径）
     #[serde(skip_serializing_if = "Option::is_none")]
     pub working_dir: Option<String>,
+    /// Claude 配置目录
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub claude_config_dir: Option<String>,
+    /// Codex 配置目录
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub codex_config_dir: Option<String>,
+    /// Gemini 配置目录
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gemini_config_dir: Option<String>,
 }
 
 /// 全局缓存：server_id -> ServerSettings
@@ -36,6 +45,21 @@ pub fn get_server_settings_cached(server_id: &str) -> Option<ServerSettings> {
 /// 获取服务器的工作目录（从缓存）
 pub fn get_server_working_dir(server_id: &str) -> Option<String> {
     get_server_settings_cached(server_id).and_then(|s| s.working_dir)
+}
+
+/// 获取服务器的 Claude 配置目录（从缓存）
+pub fn get_server_claude_config_dir(server_id: &str) -> Option<String> {
+    get_server_settings_cached(server_id).and_then(|s| s.claude_config_dir)
+}
+
+/// 获取服务器的 Codex 配置目录（从缓存）
+pub fn get_server_codex_config_dir(server_id: &str) -> Option<String> {
+    get_server_settings_cached(server_id).and_then(|s| s.codex_config_dir)
+}
+
+/// 获取服务器的 Gemini 配置目录（从缓存）
+pub fn get_server_gemini_config_dir(server_id: &str) -> Option<String> {
+    get_server_settings_cached(server_id).and_then(|s| s.gemini_config_dir)
 }
 
 /// 从 Store 读取所有服务器设置

@@ -12,6 +12,15 @@ pub struct ServerSettingsRequest {
     /// 工作目录（远程数据库路径）
     #[serde(skip_serializing_if = "Option::is_none")]
     pub working_dir: Option<String>,
+    /// Claude 配置目录
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub claude_config_dir: Option<String>,
+    /// Codex 配置目录
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub codex_config_dir: Option<String>,
+    /// Gemini 配置目录
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gemini_config_dir: Option<String>,
 }
 
 /// 服务器设置响应
@@ -21,6 +30,15 @@ pub struct ServerSettingsResponse {
     /// 工作目录（远程数据库路径）
     #[serde(skip_serializing_if = "Option::is_none")]
     pub working_dir: Option<String>,
+    /// Claude 配置目录
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub claude_config_dir: Option<String>,
+    /// Codex 配置目录
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub codex_config_dir: Option<String>,
+    /// Gemini 配置目录
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gemini_config_dir: Option<String>,
 }
 
 /// 保存服务器设置
@@ -32,6 +50,9 @@ pub async fn save_server_settings(
 ) -> Result<(), String> {
     let server_settings = server_settings::ServerSettings {
         working_dir: settings.working_dir,
+        claude_config_dir: settings.claude_config_dir,
+        codex_config_dir: settings.codex_config_dir,
+        gemini_config_dir: settings.gemini_config_dir,
     };
 
     server_settings::save_server_settings(&app, &server_id, server_settings)
@@ -48,6 +69,9 @@ pub async fn get_server_settings(
 
     Ok(ServerSettingsResponse {
         working_dir: settings.working_dir,
+        claude_config_dir: settings.claude_config_dir,
+        codex_config_dir: settings.codex_config_dir,
+        gemini_config_dir: settings.gemini_config_dir,
     })
 }
 
