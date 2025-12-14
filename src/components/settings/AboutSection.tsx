@@ -1,10 +1,11 @@
 import { useCallback, useEffect, useState } from "react";
 import {
-  Download,
+  // TODO: 检查更新功能暂时禁用
+  // Download,
   ExternalLink,
   Info,
   Loader2,
-  RefreshCw,
+  // RefreshCw,
   Terminal,
   CheckCircle2,
   AlertCircle,
@@ -15,7 +16,8 @@ import { toast } from "sonner";
 import { getVersion } from "@tauri-apps/api/app";
 import { settingsApi } from "@/lib/api";
 import { useUpdate } from "@/contexts/UpdateContext";
-import { relaunchApp } from "@/lib/updater";
+// TODO: 检查更新功能暂时禁用
+// import { relaunchApp } from "@/lib/updater";
 import { Badge } from "@/components/ui/badge";
 
 interface AboutSectionProps {
@@ -34,17 +36,19 @@ export function AboutSection({ isPortable }: AboutSectionProps) {
   const { t } = useTranslation();
   const [version, setVersion] = useState<string | null>(null);
   const [isLoadingVersion, setIsLoadingVersion] = useState(true);
-  const [isDownloading, setIsDownloading] = useState(false);
+  // TODO: 检查更新功能暂时禁用
+  const [_isDownloading, _setIsDownloading] = useState(false);
   const [toolVersions, setToolVersions] = useState<ToolVersion[]>([]);
   const [isLoadingTools, setIsLoadingTools] = useState(true);
 
   const {
-    hasUpdate,
-    updateInfo,
-    updateHandle,
-    checkUpdate,
-    resetDismiss,
-    isChecking,
+    // TODO: 检查更新功能暂时禁用
+    // hasUpdate,
+    // updateInfo,
+    // updateHandle,
+    // checkUpdate,
+    // resetDismiss,
+    // isChecking: _isChecking,
   } = useUpdate();
 
   useEffect(() => {
@@ -83,7 +87,8 @@ export function AboutSection({ isPortable }: AboutSectionProps) {
 
   const handleOpenReleaseNotes = useCallback(async () => {
     try {
-      const targetVersion = updateInfo?.availableVersion ?? version ?? "";
+      // TODO: 检查更新功能暂时禁用，直接使用当前版本
+      const targetVersion = version ?? "";
       const displayVersion = targetVersion.startsWith("v")
         ? targetVersion
         : targetVersion
@@ -92,63 +97,64 @@ export function AboutSection({ isPortable }: AboutSectionProps) {
 
       if (!displayVersion) {
         await settingsApi.openExternal(
-          "https://github.com/farion1231/cc-switch/releases",
+          "https://github.com/FanBB2333/ccs-panel/releases",
         );
         return;
       }
 
       await settingsApi.openExternal(
-        `https://github.com/farion1231/cc-switch/releases/tag/${displayVersion}`,
+        `https://github.com/FanBB2333/ccs-panel/releases/tag/${displayVersion}`,
       );
     } catch (error) {
       console.error("[AboutSection] Failed to open release notes", error);
       toast.error(t("settings.openReleaseNotesFailed"));
     }
-  }, [t, updateInfo?.availableVersion, version]);
+  }, [t, version]);
 
-  const handleCheckUpdate = useCallback(async () => {
-    if (hasUpdate && updateHandle) {
-      if (isPortable) {
-        try {
-          await settingsApi.checkUpdates();
-        } catch (error) {
-          console.error("[AboutSection] Portable update failed", error);
-        }
-        return;
-      }
-
-      setIsDownloading(true);
-      try {
-        resetDismiss();
-        await updateHandle.downloadAndInstall();
-        await relaunchApp();
-      } catch (error) {
-        console.error("[AboutSection] Update failed", error);
-        toast.error(t("settings.updateFailed"));
-        try {
-          await settingsApi.checkUpdates();
-        } catch (fallbackError) {
-          console.error(
-            "[AboutSection] Failed to open fallback updater",
-            fallbackError,
-          );
-        }
-      } finally {
-        setIsDownloading(false);
-      }
-      return;
-    }
-
-    try {
-      const available = await checkUpdate();
-      if (!available) {
-        toast.success(t("settings.upToDate"));
-      }
-    } catch (error) {
-      console.error("[AboutSection] Check update failed", error);
-      toast.error(t("settings.checkUpdateFailed"));
-    }
-  }, [checkUpdate, hasUpdate, isPortable, resetDismiss, t, updateHandle]);
+  // TODO: 检查更新功能暂时禁用
+  // const handleCheckUpdate = useCallback(async () => {
+  //   if (hasUpdate && updateHandle) {
+  //     if (isPortable) {
+  //       try {
+  //         await settingsApi.checkUpdates();
+  //       } catch (error) {
+  //         console.error("[AboutSection] Portable update failed", error);
+  //       }
+  //       return;
+  //     }
+  //
+  //     _setIsDownloading(true);
+  //     try {
+  //       resetDismiss();
+  //       await updateHandle.downloadAndInstall();
+  //       await relaunchApp();
+  //     } catch (error) {
+  //       console.error("[AboutSection] Update failed", error);
+  //       toast.error(t("settings.updateFailed"));
+  //       try {
+  //         await settingsApi.checkUpdates();
+  //       } catch (fallbackError) {
+  //         console.error(
+  //           "[AboutSection] Failed to open fallback updater",
+  //           fallbackError,
+  //         );
+  //       }
+  //     } finally {
+  //       _setIsDownloading(false);
+  //     }
+  //     return;
+  //   }
+  //
+  //   try {
+  //     const available = await checkUpdate();
+  //     if (!available) {
+  //       toast.success(t("settings.upToDate"));
+  //     }
+  //   } catch (error) {
+  //     console.error("[AboutSection] Check update failed", error);
+  //     toast.error(t("settings.checkUpdateFailed"));
+  //   }
+  // }, [checkUpdate, hasUpdate, isPortable, resetDismiss, t, updateHandle]);
 
   const displayVersion = version ?? t("common.unknown");
 
@@ -164,7 +170,7 @@ export function AboutSection({ isPortable }: AboutSectionProps) {
       <div className="rounded-xl border border-border bg-card/50 p-6 space-y-6">
         <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
           <div className="space-y-2">
-            <h4 className="text-lg font-semibold text-foreground">CC Switch</h4>
+            <h4 className="text-lg font-semibold text-foreground">CCS Panel</h4>
             <div className="flex items-center gap-2">
               <Badge variant="outline" className="gap-1.5 bg-background">
                 <span className="text-muted-foreground">
@@ -196,7 +202,8 @@ export function AboutSection({ isPortable }: AboutSectionProps) {
               <ExternalLink className="mr-2 h-4 w-4" />
               {t("settings.releaseNotes")}
             </Button>
-            <Button
+            {/* TODO: 检查更新功能暂时禁用 */}
+            {/* <Button
               type="button"
               size="sm"
               onClick={handleCheckUpdate}
@@ -223,11 +230,12 @@ export function AboutSection({ isPortable }: AboutSectionProps) {
               ) : (
                 t("settings.checkForUpdates")
               )}
-            </Button>
+            </Button> */}
           </div>
         </div>
 
-        {hasUpdate && updateInfo && (
+        {/* TODO: 更新提示暂时禁用 */}
+        {/* {hasUpdate && updateInfo && (
           <div className="rounded-lg bg-primary/10 border border-primary/20 px-4 py-3 text-sm">
             <p className="font-medium text-primary mb-1">
               {t("settings.updateAvailable", {
@@ -240,7 +248,23 @@ export function AboutSection({ isPortable }: AboutSectionProps) {
               </p>
             )}
           </div>
-        )}
+        )} */}
+
+        {/* Credits */}
+        <div className="pt-4 border-t border-border">
+          <p className="text-xs text-muted-foreground leading-relaxed">
+            CCS Panel is a fork of{" "}
+            <a
+              href="https://github.com/farion1231/cc-switch"
+              target="_blank"
+              rel="noreferrer"
+              className="text-blue-500 hover:text-blue-600 dark:text-blue-400 dark:hover:text-blue-300 underline underline-offset-2"
+            >
+              CC Switch
+            </a>
+            . Thanks to the original authors for their great work.
+          </p>
+        </div>
       </div>
 
       <div className="space-y-3">

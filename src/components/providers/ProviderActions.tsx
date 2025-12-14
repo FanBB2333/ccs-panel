@@ -7,7 +7,8 @@ import {
   Play,
   TestTube2,
   Trash2,
-  RotateCcw,
+  // TODO: Proxy 功能开发中，暂时不需要
+  // RotateCcw,
 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { Button } from "@/components/ui/button";
@@ -23,9 +24,10 @@ interface ProviderActionsProps {
   onTest?: () => void;
   onConfigureUsage: () => void;
   onDelete: () => void;
-  onResetCircuitBreaker?: () => void;
-  isProxyTarget?: boolean;
-  consecutiveFailures?: number;
+  // TODO: Proxy 功能开发中，暂时不需要
+  // onResetCircuitBreaker?: () => void;
+  // isProxyTarget?: boolean;
+  // consecutiveFailures?: number;
 }
 
 export function ProviderActions({
@@ -38,9 +40,10 @@ export function ProviderActions({
   onTest,
   onConfigureUsage,
   onDelete,
-  onResetCircuitBreaker,
-  isProxyTarget,
-  consecutiveFailures = 0,
+  // TODO: Proxy 功能开发中，暂时不需要
+  // onResetCircuitBreaker,
+  // isProxyTarget,
+  // consecutiveFailures = 0,
 }: ProviderActionsProps) {
   const { t } = useTranslation();
   const iconButtonClass = "h-8 w-8 p-1";

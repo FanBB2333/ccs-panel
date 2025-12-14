@@ -35,9 +35,11 @@ import { AddProviderDialog } from "@/components/providers/AddProviderDialog";
 import { EditProviderDialog } from "@/components/providers/EditProviderDialog";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { SettingsPage } from "@/components/settings/SettingsPage";
-import { UpdateBadge } from "@/components/UpdateBadge";
+// TODO: 更新提示暂时禁用
+// import { UpdateBadge } from "@/components/UpdateBadge";
 import { EnvWarningBanner } from "@/components/env/EnvWarningBanner";
-import { ProxyToggle } from "@/components/proxy/ProxyToggle";
+// TODO: Proxy 功能开发中，暂时隐藏入口
+// import { ProxyToggle } from "@/components/proxy/ProxyToggle";
 import UsageScriptModal from "@/components/UsageScriptModal";
 import UnifiedMcpPanel from "@/components/mcp/UnifiedMcpPanel";
 import PromptPanel from "@/components/prompts/PromptPanel";
@@ -416,26 +418,16 @@ function App() {
             {/* 一级页面：服务器管理主页 */}
             {isOnServerHome ? (
               <>
-                <div className="flex items-center gap-2">
-                  <a
-                    href="https://github.com/farion1231/cc-switch"
-                    target="_blank"
-                    rel="noreferrer"
-                    className="text-xl font-semibold transition-colors text-blue-500 hover:text-blue-600 dark:text-blue-400 dark:hover:text-blue-300"
-                  >
-                    CCS Panel
-                  </a>
-                  <Button
-                    variant="ghost"
-                    size="icon"
-                    onClick={() => setCurrentView("settings")}
-                    title={t("common.settings")}
-                    className="hover:bg-black/5 dark:hover:bg-white/5"
-                  >
-                    <Settings className="h-4 w-4" />
-                  </Button>
-                </div>
-                <UpdateBadge onClick={() => setCurrentView("settings")} />
+                <a
+                  href="https://github.com/FanBB2333/ccs-panel"
+                  target="_blank"
+                  rel="noreferrer"
+                  className="text-xl font-semibold transition-colors text-blue-500 hover:text-blue-600 dark:text-blue-400 dark:hover:text-blue-300"
+                >
+                  CCS Panel
+                </a>
+                {/* TODO: 更新提示暂时禁用 */}
+                {/* <UpdateBadge onClick={() => setCurrentView("settings")} /> */}
               </>
             ) : currentView !== "providers" ? (
               /* 二级页面的子页面（settings/prompts等） */
@@ -503,7 +495,8 @@ function App() {
                     <Settings className="h-4 w-4" />
                   </Button>
                 </div>
-                <UpdateBadge onClick={() => setCurrentView("settings")} />
+                {/* TODO: 更新提示暂时禁用 */}
+                {/* <UpdateBadge onClick={() => setCurrentView("settings")} /> */}
               </>
             )}
           </div>
@@ -556,8 +549,8 @@ function App() {
             )}
             {currentView === "providers" && !isOnServerHome && (
               <>
-                {/* Proxy 功能仅对远程服务器显示 */}
-                {currentServer && !currentServer.isLocal && <ProxyToggle />}
+                {/* TODO: Proxy 功能开发中，暂时隐藏入口 */}
+                {/* {currentServer && !currentServer.isLocal && <ProxyToggle />} */}
 
                 <AppSwitcher activeApp={activeApp} onSwitch={setActiveApp} />
 

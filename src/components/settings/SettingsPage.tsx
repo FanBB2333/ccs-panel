@@ -1,13 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import {
-  Loader2,
-  Save,
-  FolderSearch,
-  Activity,
-  Coins,
-  Database,
-  Server,
-} from "lucide-react";
+import { Loader2, Save, FolderSearch, Coins, Database, Activity } from "lucide-react";
 import { toast } from "sonner";
 import {
   Dialog,
@@ -31,7 +23,8 @@ import { WindowSettings } from "@/components/settings/WindowSettings";
 import { DirectorySettings } from "@/components/settings/DirectorySettings";
 import { ImportExportSection } from "@/components/settings/ImportExportSection";
 import { AboutSection } from "@/components/settings/AboutSection";
-import { ProxyPanel } from "@/components/proxy";
+// TODO: Proxy 功能开发中，暂时不需要
+// import { ProxyPanel } from "@/components/proxy";
 import { PricingConfigPanel } from "@/components/usage/PricingConfigPanel";
 import { ModelTestConfigPanel } from "@/components/usage/ModelTestConfigPanel";
 import { AutoFailoverConfigPanel } from "@/components/proxy/AutoFailoverConfigPanel";
@@ -40,9 +33,11 @@ import { useSettings } from "@/hooks/useSettings";
 import { useImportExport } from "@/hooks/useImportExport";
 import { useTranslation } from "react-i18next";
 import type { SettingsFormState } from "@/hooks/useSettings";
+// TODO: Proxy 功能开发中，暂时不需要
+// import { Switch } from "@/components/ui/switch";
+// import { Badge } from "@/components/ui/badge";
+// import { useProxyStatus } from "@/hooks/useProxyStatus";
 import { Switch } from "@/components/ui/switch";
-import { Badge } from "@/components/ui/badge";
-import { useProxyStatus } from "@/hooks/useProxyStatus";
 import { useServer } from "@/contexts/ServerContext";
 
 interface SettingsDialogProps {
@@ -57,7 +52,9 @@ export function SettingsPage({
   onImportSuccess,
 }: SettingsDialogProps) {
   const { t } = useTranslation();
-  const { currentServer, currentServerId } = useServer();
+  // TODO: Proxy 功能开发中，暂时不需要
+  // const { currentServer, currentServerId } = useServer();
+  void useServer(); // Keep the hook call for future use
   const {
     settings,
     isLoading,
@@ -174,25 +171,26 @@ export function SettingsPage({
 
   const isBusy = useMemo(() => isLoading && !settings, [isLoading, settings]);
 
-  const {
-    isRunning,
-    startWithTakeover: startProxy,
-    stopWithRestore: stopProxy,
-    isPending: isProxyPending,
-  } = useProxyStatus({ serverId: currentServerId });
+  // TODO: Proxy 功能开发中，暂时禁用
+  // const {
+  //   isRunning,
+  //   startWithTakeover: startProxy,
+  //   stopWithRestore: stopProxy,
+  //   isPending: isProxyPending,
+  // } = useProxyStatus({ serverId: currentServerId });
   const [failoverEnabled, setFailoverEnabled] = useState(true);
 
-  const handleToggleProxy = async (checked: boolean) => {
-    try {
-      if (!checked) {
-        await stopProxy();
-      } else {
-        await startProxy();
-      }
-    } catch (error) {
-      console.error("Toggle proxy failed:", error);
-    }
-  };
+  // const handleToggleProxy = async (checked: boolean) => {
+  //   try {
+  //     if (!checked) {
+  //       await stopProxy();
+  //     } else {
+  //       await startProxy();
+  //     }
+  //   } catch (error) {
+  //     console.error("Toggle proxy failed:", error);
+  //   }
+  // };
 
   return (
     <div className="mx-auto max-w-[56rem] flex flex-col h-[calc(100vh-8rem)] overflow-hidden px-6">
@@ -278,8 +276,8 @@ export function SettingsPage({
                       </AccordionContent>
                     </AccordionItem>
 
-                    {/* 本地代理仅对远程服务器显示 */}
-                    {currentServer && !currentServer.isLocal && (
+                    {/* TODO: Proxy 功能开发中，暂时隐藏入口 */}
+                    {/* {currentServer && !currentServer.isLocal && (
                     <AccordionItem
                       value="proxy"
                       className="rounded-xl glass-card overflow-hidden"
@@ -322,7 +320,7 @@ export function SettingsPage({
                         <ProxyPanel />
                       </AccordionContent>
                     </AccordionItem>
-                    )}
+                    )} */}
 
                     <AccordionItem
                       value="test"
