@@ -443,14 +443,25 @@ impl SshService {
         None
     }
 
-    /// 解决数据库路径：如果存在则返回，不存在则返回默认路径
+    /// 解决数据库路径：优先使用用户配置的工作目录，否则查找现有路径，最后返回默认路径
     pub async fn resolve_db_path(&self, server_id: &str) -> String {
-        if let Some(path) = self.find_existing_db_path(server_id).await {
-            path
-        } else {
-            // 默认使用 ~/.cc-switch/cc-switch.db（与本地一致）
-             "~/.cc-switch/cc-switch.db".to_string()
+        // 1. 优先使用用户配置的工作目录
+        if let Some(working_dir) = crate::server_settings::get_server_working_dir(server_id) {
+            log::info!(
+                "[resolve_db_path] Using configured working_dir for server {}: {}",
+                server_id,
+                working_dir
+            );
+            return working_dir;
         }
+
+        // 2. 查找现有的数据库路径
+        if let Some(path) = self.find_existing_db_path(server_id).await {
+            return path;
+        }
+
+        // 3. 默认使用 ~/.cc-switch/cc-switch.db（与本地一致）
+        "~/.cc-switch/cc-switch.db".to_string()
     }
 
     /// 读取远程 CCS Panel 配置

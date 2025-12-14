@@ -124,4 +124,23 @@ export const sshApi = {
   ): Promise<void> => {
     return invoke("ssh_delete_remote_provider", { serverId, providerId, appType });
   },
+
+  /**
+   * 保存服务器设置（工作目录等）
+   */
+  saveServerSettings: async (
+    serverId: string,
+    settings: { workingDir?: string }
+  ): Promise<void> => {
+    return invoke("save_server_settings", { serverId, settings });
+  },
+
+  /**
+   * 获取服务器设置
+   */
+  getServerSettings: async (
+    serverId: string
+  ): Promise<{ workingDir?: string }> => {
+    return invoke("get_server_settings", { serverId });
+  },
 };

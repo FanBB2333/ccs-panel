@@ -25,6 +25,8 @@ export interface RemoteConfigDirs {
   claudeConfigDir?: string;
   codexConfigDir?: string;
   geminiConfigDir?: string;
+  /** 远程服务器的工作目录（CCS Panel 数据库路径） */
+  workingDir?: string;
 }
 
 // 服务器配置

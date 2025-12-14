@@ -275,6 +275,7 @@ export function SettingsPage({
                       <AccordionContent className="px-6 pb-6 pt-4 border-t border-border/50">
                         {isRemoteServer ? (
                           <ServerDirectorySettings
+                            serverId={currentServer.id}
                             configDirs={currentServer.configDirs ?? {}}
                             onConfigDirsChange={handleServerConfigDirsChange}
                           />

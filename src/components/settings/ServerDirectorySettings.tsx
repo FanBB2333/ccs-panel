@@ -1,19 +1,53 @@
-import { Undo2 } from "lucide-react";
+import { useState, useEffect, useCallback } from "react";
+import { Undo2, Save, Loader2 } from "lucide-react";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { useTranslation } from "react-i18next";
+import { toast } from "sonner";
 import type { RemoteConfigDirs } from "@/types/server";
+import { sshApi } from "@/lib/api";
 
 interface ServerDirectorySettingsProps {
+  serverId: string;
   configDirs: RemoteConfigDirs;
   onConfigDirsChange: (dirs: RemoteConfigDirs) => void;
 }
 
 export function ServerDirectorySettings({
+  serverId,
   configDirs,
   onConfigDirsChange,
 }: ServerDirectorySettingsProps) {
   const { t } = useTranslation();
+  const [isSaving, setIsSaving] = useState(false);
+  const [localWorkingDir, setLocalWorkingDir] = useState(configDirs.workingDir ?? "");
+
+  // Sync local state when configDirs changes from external source
+  useEffect(() => {
+    setLocalWorkingDir(configDirs.workingDir ?? "");
+  }, [configDirs.workingDir]);
+
+  const handleSaveWorkingDir = useCallback(async () => {
+    setIsSaving(true);
+    try {
+      const workingDir = localWorkingDir.trim() || undefined;
+      await sshApi.saveServerSettings(serverId, { workingDir });
+      onConfigDirsChange({
+        ...configDirs,
+        workingDir,
+      });
+      toast.success(t("settings.workingDirSaved", { defaultValue: "工作目录已保存" }));
+    } catch (error) {
+      console.error("[ServerDirectorySettings] Failed to save working dir:", error);
+      toast.error(t("settings.workingDirSaveFailed", { defaultValue: "保存工作目录失败" }));
+    } finally {
+      setIsSaving(false);
+    }
+  }, [serverId, localWorkingDir, configDirs, onConfigDirsChange, t]);
+
+  const handleResetWorkingDir = useCallback(() => {
+    setLocalWorkingDir("");
+  }, []);
 
   const handleChange = (
     key: keyof RemoteConfigDirs,
@@ -34,6 +68,56 @@ export function ServerDirectorySettings({
 
   return (
     <section className="space-y-4">
+      {/* 工作目录（CCS Panel 数据库路径） */}
+      <div className="space-y-1">
+        <h3 className="text-sm font-medium">
+          {t("settings.workingDirectory", {
+            defaultValue: "工作目录",
+          })}
+        </h3>
+        <p className="text-xs text-muted-foreground">
+          {t("settings.workingDirectoryDescription", {
+            defaultValue:
+              "设置远程服务器上 CCS Panel 数据库的存储路径。留空则使用默认路径 ~/.cc-switch/cc-switch.db",
+          })}
+        </p>
+        <div className="flex items-center gap-2 mt-2">
+          <Input
+            value={localWorkingDir}
+            placeholder={t("settings.workingDirPlaceholder", {
+              defaultValue: "~/.cc-switch/cc-switch.db (default)",
+            })}
+            className="text-xs"
+            onChange={(e) => setLocalWorkingDir(e.target.value)}
+          />
+          <Button
+            type="button"
+            variant="outline"
+            size="icon"
+            onClick={handleResetWorkingDir}
+            title={t("settings.resetDefault")}
+          >
+            <Undo2 className="h-4 w-4" />
+          </Button>
+          <Button
+            type="button"
+            size="sm"
+            onClick={handleSaveWorkingDir}
+            disabled={isSaving}
+          >
+            {isSaving ? (
+              <Loader2 className="h-4 w-4 animate-spin" />
+            ) : (
+              <>
+                <Save className="h-4 w-4 mr-1" />
+                {t("common.save", { defaultValue: "保存" })}
+              </>
+            )}
+          </Button>
+        </div>
+      </div>
+
+      {/* 配置目录 */}
       <header className="space-y-1">
         <h3 className="text-sm font-medium">
           {t("settings.remoteConfigDirectory", {

@@ -18,6 +18,7 @@ mod prompt_files;
 mod provider;
 mod provider_defaults;
 mod proxy;
+mod server_settings;
 mod services;
 mod settings;
 mod store;
@@ -258,6 +259,9 @@ pub fn run() {
 
             // 预先刷新 Store 覆盖配置，确保 AppState 初始化时可读取到最新路径
             app_store::refresh_app_config_dir_override(app.handle());
+
+            // 刷新服务器设置缓存
+            server_settings::refresh_cache(app.handle());
 
             // 初始化数据库
             let app_config_dir = crate::config::get_app_config_dir();
@@ -718,6 +722,10 @@ pub fn run() {
             commands::ssh_update_remote_provider,
             commands::ssh_switch_remote_provider,
             commands::ssh_delete_remote_provider,
+            // Server settings management
+            commands::save_server_settings,
+            commands::get_server_settings,
+            commands::delete_server_settings,
         ]);
 
     let app = builder
