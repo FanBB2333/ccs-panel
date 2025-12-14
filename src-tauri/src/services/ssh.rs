@@ -711,23 +711,30 @@ impl SshService {
 
         match app_type {
             "claude" => {
-                // Claude: Write to ~/.claude/settings.json
+                // Claude: Write to ~/.claude/settings.json (or custom path)
+                let claude_dir = crate::server_settings::get_server_claude_config_dir(server_id)
+                    .unwrap_or_else(|| "~/.claude".to_string());
                 let config_json = serde_json::to_string_pretty(settings_config)
                     .map_err(|e| SshError::InvalidConfig(format!("Failed to serialize config: {}", e)))?;
 
                 // Create directory if not exists
-                self.execute(server_id, "mkdir -p ~/.claude").await?;
+                let mkdir_cmd = format!("mkdir -p {}", Self::quote_path_for_shell(&claude_dir));
+                self.execute(server_id, &mkdir_cmd).await?;
 
                 // Write config using heredoc to handle special characters
+                let settings_path = format!("{}/settings.json", claude_dir);
                 let cmd = format!(
-                    "cat > ~/.claude/settings.json << 'EOFCONFIG'\n{}\nEOFCONFIG",
+                    "cat > {} << 'EOFCONFIG'\n{}\nEOFCONFIG",
+                    Self::quote_path_for_shell(&settings_path),
                     config_json
                 );
                 self.execute(server_id, &cmd).await?;
-                log::info!("[write_remote_live_config] Wrote Claude settings.json");
+                log::info!("[write_remote_live_config] Wrote Claude settings.json to {}", settings_path);
             }
             "codex" => {
                 // Codex: Write auth.json and config.md separately
+                let codex_dir = crate::server_settings::get_server_codex_config_dir(server_id)
+                    .unwrap_or_else(|| "~/.codex".to_string());
                 let obj = settings_config.as_object().ok_or_else(|| {
                     SshError::InvalidConfig("Codex config must be a JSON object".to_string())
                 })?;
@@ -737,28 +744,38 @@ impl SshService {
                     let auth_json = serde_json::to_string_pretty(auth)
                         .map_err(|e| SshError::InvalidConfig(format!("Failed to serialize auth: {}", e)))?;
 
-                    self.execute(server_id, "mkdir -p ~/.codex").await?;
+                    let mkdir_cmd = format!("mkdir -p {}", Self::quote_path_for_shell(&codex_dir));
+                    self.execute(server_id, &mkdir_cmd).await?;
+
+                    let auth_path = format!("{}/auth.json", codex_dir);
                     let cmd = format!(
-                        "cat > ~/.codex/auth.json << 'EOFCONFIG'\n{}\nEOFCONFIG",
+                        "cat > {} << 'EOFCONFIG'\n{}\nEOFCONFIG",
+                        Self::quote_path_for_shell(&auth_path),
                         auth_json
                     );
                     self.execute(server_id, &cmd).await?;
-                    log::info!("[write_remote_live_config] Wrote Codex auth.json");
+                    log::info!("[write_remote_live_config] Wrote Codex auth.json to {}", auth_path);
                 }
 
                 // Write config (config.md or similar)
                 if let Some(config) = obj.get("config").and_then(|v| v.as_str()) {
-                    self.execute(server_id, "mkdir -p ~/.codex").await?;
+                    let mkdir_cmd = format!("mkdir -p {}", Self::quote_path_for_shell(&codex_dir));
+                    self.execute(server_id, &mkdir_cmd).await?;
+
+                    let config_path = format!("{}/config.md", codex_dir);
                     let cmd = format!(
-                        "cat > ~/.codex/config.md << 'EOFCONFIG'\n{}\nEOFCONFIG",
+                        "cat > {} << 'EOFCONFIG'\n{}\nEOFCONFIG",
+                        Self::quote_path_for_shell(&config_path),
                         config
                     );
                     self.execute(server_id, &cmd).await?;
-                    log::info!("[write_remote_live_config] Wrote Codex config.md");
+                    log::info!("[write_remote_live_config] Wrote Codex config.md to {}", config_path);
                 }
             }
             "gemini" => {
                 // Gemini: Write .env file
+                let gemini_dir = crate::server_settings::get_server_gemini_config_dir(server_id)
+                    .unwrap_or_else(|| "~/.gemini".to_string());
                 // settings_config should contain the env content as a string or structured data
                 let env_content = if let Some(s) = settings_config.as_str() {
                     s.to_string()
@@ -772,13 +789,17 @@ impl SshService {
                     return Err(SshError::InvalidConfig("Gemini config format not recognized".to_string()));
                 };
 
-                self.execute(server_id, "mkdir -p ~/.gemini").await?;
+                let mkdir_cmd = format!("mkdir -p {}", Self::quote_path_for_shell(&gemini_dir));
+                self.execute(server_id, &mkdir_cmd).await?;
+
+                let env_path = format!("{}/.env", gemini_dir);
                 let cmd = format!(
-                    "cat > ~/.gemini/.env << 'EOFCONFIG'\n{}\nEOFCONFIG",
+                    "cat > {} << 'EOFCONFIG'\n{}\nEOFCONFIG",
+                    Self::quote_path_for_shell(&env_path),
                     env_content
                 );
                 self.execute(server_id, &cmd).await?;
-                log::info!("[write_remote_live_config] Wrote Gemini .env");
+                log::info!("[write_remote_live_config] Wrote Gemini .env to {}", env_path);
             }
             _ => {
                 log::warn!("[write_remote_live_config] Unknown app_type: {}", app_type);
