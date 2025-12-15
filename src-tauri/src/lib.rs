@@ -50,7 +50,6 @@ use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 
 use std::sync::Arc;
 use tauri::tray::{TrayIconBuilder, TrayIconEvent};
-#[cfg(target_os = "macos")]
 use tauri::RunEvent;
 use tauri::{Emitter, Manager};
 
