@@ -41,3 +41,22 @@ jobs:
         with:
           name: tauri-${{ matrix.os }}
           path: src-tauri/target/release/bundle/**
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/download-artifact@v4
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            **/*.dmg
+            **/*.exe
+            **/*.msi
+            **/*.AppImage
+            **/*.deb
+            **/*.rpm
