@@ -47,9 +47,6 @@ interface ServerContextValue {
 
 const ServerContext = createContext<ServerContextValue | undefined>(undefined);
 
-// legacy: 旧版本使用 localStorage 持久化（dev/prod origin 不一致会导致数据分裂）
-const LEGACY_STORAGE_KEY = "ccs-panel:servers";
-
 function ensureLocalServer(servers: ManagedServersMap): ManagedServersMap {
   const next = { ...servers };
 
@@ -94,52 +91,20 @@ export function ServerProvider({ children }: { children: React.ReactNode }) {
   // 当前选中的服务器对象
   const currentServer = currentServerId ? servers[currentServerId] || null : null;
 
-  // 初始化：从后端读取 servers.json + servers.db，并在首次运行时迁移 legacy localStorage 数据
+  // 初始化：从后端读取服务器列表（统一持久化，避免 dev/prod origin 导致 localStorage 不一致）
   useEffect(() => {
     let canceled = false;
 
     const load = async () => {
-      let loaded: ManagedServersMap | null = null;
-
       try {
-        loaded = await serversApi.getManagedServers();
+        const loaded = await serversApi.getManagedServers();
+        const normalized = resetRemoteStatusOnStartup(
+          ensureLocalServer(loaded ?? {})
+        );
+        if (!canceled) setServers(normalized);
       } catch (error) {
         console.error("[ServerContext] Failed to load servers from backend:", error);
-      }
-
-      // 尝试迁移旧 localStorage（仅当后端没有远程服务器时）
-      try {
-        const legacyRaw = localStorage.getItem(LEGACY_STORAGE_KEY);
-        if (legacyRaw) {
-          const legacyParsed = JSON.parse(legacyRaw) as ManagedServersMap;
-
-          const normalizedLoaded = resetRemoteStatusOnStartup(
-            ensureLocalServer(loaded ?? {})
-          );
-          const normalizedLegacy = resetRemoteStatusOnStartup(
-            ensureLocalServer(legacyParsed)
-          );
-
-          const hasRemote = (m: ManagedServersMap) =>
-            Object.keys(m).some((id) => id !== LOCAL_SERVER_ID);
-
-          if (!hasRemote(normalizedLoaded) && hasRemote(normalizedLegacy)) {
-            await serversApi.setManagedServers(normalizedLegacy);
-            localStorage.removeItem(LEGACY_STORAGE_KEY);
-            loaded = normalizedLegacy;
-            console.info("[ServerContext] Migrated legacy servers from localStorage.");
-          }
-        }
-      } catch (error) {
-        console.warn("[ServerContext] Legacy migration failed:", error);
-      }
-
-      const normalized = resetRemoteStatusOnStartup(
-        ensureLocalServer(loaded ?? {})
-      );
-
-      if (!canceled) {
-        setServers(normalized);
+        if (!canceled) setServers(resetRemoteStatusOnStartup(ensureLocalServer({})));
       }
     };
 
@@ -172,16 +137,17 @@ export function ServerProvider({ children }: { children: React.ReactNode }) {
   // 更新服务器状态
   const updateServerStatus = useCallback(
     (serverId: string, status: ManagedServer["status"]) => {
-      setServers((prev) => ({
+      updateServersAndPersist((prev) => ({
         ...prev,
         [serverId]: {
           ...prev[serverId],
           status,
-          lastConnected: status === "connected" ? Date.now() : prev[serverId]?.lastConnected,
+          lastConnected:
+            status === "connected" ? Date.now() : prev[serverId]?.lastConnected,
         },
       }));
     },
-    []
+    [updateServersAndPersist]
   );
 
   // 连接到远程服务器

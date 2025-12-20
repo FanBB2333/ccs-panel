@@ -1,8 +1,8 @@
-use crate::config::{get_app_config_dir, read_json_file, write_json_file};
+use crate::config::get_app_config_dir;
 use crate::error::AppError;
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -28,11 +28,11 @@ pub struct SshConfig {
     pub port: u16,
     pub username: String,
     pub auth_type: String,
-    #[serde(skip_serializing)]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub password: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub private_key_path: Option<String>,
-    #[serde(skip_serializing)]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub passphrase: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sqlite3_path: Option<String>,
@@ -57,6 +57,7 @@ pub struct ManagedServer {
 }
 
 const LOCAL_SERVER_ID: &str = "local";
+const STATE_ROW_ID: i64 = 1;
 
 fn now_ms() -> i64 {
     SystemTime::now()
@@ -79,16 +80,12 @@ fn create_local_server() -> ManagedServer {
     }
 }
 
-pub fn servers_json_path() -> PathBuf {
-    get_app_config_dir().join("servers.json")
-}
-
-fn secrets_db_path() -> PathBuf {
+fn servers_db_path() -> PathBuf {
     get_app_config_dir().join("servers.db")
 }
 
-fn open_secrets_db() -> Result<Connection, AppError> {
-    let path = secrets_db_path();
+fn open_servers_db() -> Result<(Connection, PathBuf), AppError> {
+    let path = servers_db_path();
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| AppError::io(parent, e))?;
     }
@@ -96,66 +93,14 @@ fn open_secrets_db() -> Result<Connection, AppError> {
     let conn = Connection::open(&path)?;
     conn.execute_batch(
         r#"
-        CREATE TABLE IF NOT EXISTS server_secrets (
-          server_id  TEXT PRIMARY KEY,
-          password   TEXT,
-          passphrase TEXT,
+        CREATE TABLE IF NOT EXISTS managed_servers_state (
+          id         INTEGER PRIMARY KEY CHECK (id = 1),
+          data       TEXT NOT NULL,
           updated_at INTEGER NOT NULL
         );
         "#,
     )?;
-    Ok(conn)
-}
-
-fn read_secret(conn: &Connection, server_id: &str) -> Result<(Option<String>, Option<String>), AppError> {
-    let mut stmt = conn.prepare(
-        "SELECT password, passphrase FROM server_secrets WHERE server_id = ?1 LIMIT 1",
-    )?;
-    let mut rows = stmt.query(params![server_id])?;
-    if let Some(row) = rows.next()? {
-        let password: Option<String> = row.get(0)?;
-        let passphrase: Option<String> = row.get(1)?;
-        return Ok((password, passphrase));
-    }
-    Ok((None, None))
-}
-
-fn upsert_secret(
-    conn: &Connection,
-    server_id: &str,
-    password: Option<&str>,
-    passphrase: Option<&str>,
-) -> Result<(), AppError> {
-    conn.execute(
-        r#"
-        INSERT INTO server_secrets (server_id, password, passphrase, updated_at)
-        VALUES (?1, ?2, ?3, ?4)
-        ON CONFLICT(server_id) DO UPDATE SET
-          password   = excluded.password,
-          passphrase = excluded.passphrase,
-          updated_at = excluded.updated_at
-        "#,
-        params![server_id, password, passphrase, now_ms()],
-    )?;
-    Ok(())
-}
-
-fn delete_secret(conn: &Connection, server_id: &str) -> Result<(), AppError> {
-    conn.execute(
-        "DELETE FROM server_secrets WHERE server_id = ?1",
-        params![server_id],
-    )?;
-    Ok(())
-}
-
-fn list_secret_ids(conn: &Connection) -> Result<Vec<String>, AppError> {
-    let mut stmt = conn.prepare("SELECT server_id FROM server_secrets")?;
-    let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
-    let mut ids = Vec::new();
-    for id in rows {
-        ids.push(id?);
-    }
-    Ok(ids)
+    Ok((conn, path))
 }
 
 #[cfg(unix)]
@@ -189,87 +134,44 @@ fn normalize_loaded_servers(mut servers: ManagedServersMap) -> ManagedServersMap
 }
 
 pub fn load_managed_servers() -> Result<ManagedServersMap, AppError> {
-    let path = servers_json_path();
+    let (conn, _path) = open_servers_db()?;
 
-    let mut servers: ManagedServersMap = if path.exists() {
-        match read_json_file(&path) {
-            Ok(v) => v,
-            Err(e) => {
-                log::warn!("[managed_servers] 读取 servers.json 失败，将回退到默认值: {e}");
-                HashMap::new()
-            }
-        }
-    } else {
-        HashMap::new()
+    let stored: Result<String, rusqlite::Error> = conn.query_row(
+        "SELECT data FROM managed_servers_state WHERE id = ?1",
+        params![STATE_ROW_ID],
+        |row| row.get(0),
+    );
+
+    let servers: ManagedServersMap = match stored {
+        Ok(json) => serde_json::from_str(&json).map_err(|e| {
+            AppError::Config(format!("解析 servers.db 中的服务器数据失败: {e}"))
+        })?,
+        Err(rusqlite::Error::QueryReturnedNoRows) => HashMap::new(),
+        Err(e) => return Err(AppError::from(e)),
     };
 
-    servers = normalize_loaded_servers(servers);
-
-    // 合并 secrets（如果存在）
-    let conn = open_secrets_db()?;
-    for (id, server) in servers.iter_mut() {
-        if id == LOCAL_SERVER_ID {
-            continue;
-        }
-        let Some(ssh) = server.ssh_config.as_mut() else {
-            continue;
-        };
-        let (password, passphrase) = read_secret(&conn, id)?;
-        ssh.password = password;
-        ssh.passphrase = passphrase;
-    }
-
-    Ok(servers)
+    Ok(normalize_loaded_servers(servers))
 }
 
 pub fn save_managed_servers(mut servers: ManagedServersMap) -> Result<(), AppError> {
     servers = normalize_loaded_servers(servers);
 
-    let path = servers_json_path();
-    let conn = open_secrets_db()?;
+    let (conn, db_path) = open_servers_db()?;
+    let json = serde_json::to_string(&servers)
+        .map_err(|e| AppError::JsonSerialize { source: e })?;
 
-    // 同步 secrets
-    let present: HashSet<String> = servers.keys().cloned().collect();
-    for existing_id in list_secret_ids(&conn)? {
-        if !present.contains(&existing_id) {
-            let _ = delete_secret(&conn, &existing_id);
-        }
-    }
+    conn.execute(
+        r#"
+        INSERT INTO managed_servers_state (id, data, updated_at)
+        VALUES (?1, ?2, ?3)
+        ON CONFLICT(id) DO UPDATE SET
+          data = excluded.data,
+          updated_at = excluded.updated_at
+        "#,
+        params![STATE_ROW_ID, json, now_ms()],
+    )?;
 
-    for (id, server) in servers.iter() {
-        if id == LOCAL_SERVER_ID {
-            continue;
-        }
-        let Some(ssh) = server.ssh_config.as_ref() else {
-            let _ = delete_secret(&conn, id);
-            continue;
-        };
-
-        let password = ssh
-            .password
-            .as_deref()
-            .map(str::trim)
-            .filter(|s| !s.is_empty());
-        let passphrase = ssh
-            .passphrase
-            .as_deref()
-            .map(str::trim)
-            .filter(|s| !s.is_empty());
-
-        if password.is_none() && passphrase.is_none() {
-            let _ = delete_secret(&conn, id);
-        } else {
-            upsert_secret(&conn, id, password, passphrase)?;
-        }
-    }
-
-    // 写入 servers.json（password/passphrase 会被 skip_serializing 自动剔除）
-    write_json_file(&path, &servers)?;
-    set_owner_only_perms(&path);
-
-    let db_path = secrets_db_path();
     set_owner_only_perms(&db_path);
 
     Ok(())
 }
-
