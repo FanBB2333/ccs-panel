@@ -6,6 +6,7 @@ export { promptsApi } from "./prompts";
 export { usageApi } from "./usage";
 export { vscodeApi } from "./vscode";
 export { sshApi } from "./ssh";
+export { serversApi } from "./servers";
 export * as configApi from "./config";
 export type { ProviderSwitchEvent } from "./providers";
 export type { Prompt } from "./prompts";

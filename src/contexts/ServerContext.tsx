@@ -7,7 +7,7 @@ import React, {
 } from "react";
 import { toast } from "sonner";
 import type { ManagedServer, ManagedServersMap } from "../types/server";
-import { sshApi, type SshConnectRequest } from "../lib/api";
+import { serversApi, sshApi, type SshConnectRequest } from "../lib/api";
 
 // 本地服务器的固定 ID
 const LOCAL_SERVER_ID = "local";
@@ -47,34 +47,38 @@ interface ServerContextValue {
 
 const ServerContext = createContext<ServerContextValue | undefined>(undefined);
 
-const STORAGE_KEY = "ccs-panel:servers";
-const CURRENT_SERVER_KEY = "ccs-panel:currentServer";
+// legacy: 旧版本使用 localStorage 持久化（dev/prod origin 不一致会导致数据分裂）
+const LEGACY_STORAGE_KEY = "ccs-panel:servers";
+
+function ensureLocalServer(servers: ManagedServersMap): ManagedServersMap {
+  const next = { ...servers };
+
+  if (!next[LOCAL_SERVER_ID]) {
+    next[LOCAL_SERVER_ID] = createLocalServer();
+  }
+
+  // 修正 id 字段（以 map key 为准）
+  Object.keys(next).forEach((id) => {
+    next[id] = { ...next[id], id };
+  });
+
+  return next;
+}
+
+function resetRemoteStatusOnStartup(servers: ManagedServersMap): ManagedServersMap {
+  const next = { ...servers };
+  Object.keys(next).forEach((id) => {
+    if (id !== LOCAL_SERVER_ID) {
+      next[id] = { ...next[id], status: "disconnected" };
+    }
+  });
+  return next;
+}
 
 export function ServerProvider({ children }: { children: React.ReactNode }) {
-  const [servers, setServers] = useState<ManagedServersMap>(() => {
-    // 从 localStorage 加载服务器列表
-    try {
-      const stored = localStorage.getItem(STORAGE_KEY);
-      if (stored) {
-        const parsed = JSON.parse(stored) as ManagedServersMap;
-        // 确保本地服务器始终存在
-        if (!parsed[LOCAL_SERVER_ID]) {
-          parsed[LOCAL_SERVER_ID] = createLocalServer();
-        }
-        // 远程服务器启动时重置为未连接状态
-        Object.keys(parsed).forEach((id) => {
-          if (id !== LOCAL_SERVER_ID) {
-            parsed[id].status = "disconnected";
-          }
-        });
-        return parsed;
-      }
-    } catch (error) {
-      console.error("[ServerContext] Failed to load servers from storage:", error);
-    }
-    // 默认只有本地服务器
-    return { [LOCAL_SERVER_ID]: createLocalServer() };
-  });
+  const [servers, setServers] = useState<ManagedServersMap>(() =>
+    ensureLocalServer({ [LOCAL_SERVER_ID]: createLocalServer() })
+  );
 
   const [currentServerId, setCurrentServerId] = useState<string | null>(() => {
     // 应用启动时始终显示服务器管理主页
@@ -90,27 +94,80 @@ export function ServerProvider({ children }: { children: React.ReactNode }) {
   // 当前选中的服务器对象
   const currentServer = currentServerId ? servers[currentServerId] || null : null;
 
-  // 持久化服务器列表
+  // 初始化：从后端读取 servers.json + servers.db，并在首次运行时迁移 legacy localStorage 数据
   useEffect(() => {
-    try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(servers));
-    } catch (error) {
-      console.error("[ServerContext] Failed to save servers to storage:", error);
-    }
-  }, [servers]);
+    let canceled = false;
 
-  // 持久化当前选中的服务器
-  useEffect(() => {
-    try {
-      if (currentServerId) {
-        localStorage.setItem(CURRENT_SERVER_KEY, currentServerId);
-      } else {
-        localStorage.removeItem(CURRENT_SERVER_KEY);
+    const load = async () => {
+      let loaded: ManagedServersMap | null = null;
+
+      try {
+        loaded = await serversApi.getManagedServers();
+      } catch (error) {
+        console.error("[ServerContext] Failed to load servers from backend:", error);
       }
+
+      // 尝试迁移旧 localStorage（仅当后端没有远程服务器时）
+      try {
+        const legacyRaw = localStorage.getItem(LEGACY_STORAGE_KEY);
+        if (legacyRaw) {
+          const legacyParsed = JSON.parse(legacyRaw) as ManagedServersMap;
+
+          const normalizedLoaded = resetRemoteStatusOnStartup(
+            ensureLocalServer(loaded ?? {})
+          );
+          const normalizedLegacy = resetRemoteStatusOnStartup(
+            ensureLocalServer(legacyParsed)
+          );
+
+          const hasRemote = (m: ManagedServersMap) =>
+            Object.keys(m).some((id) => id !== LOCAL_SERVER_ID);
+
+          if (!hasRemote(normalizedLoaded) && hasRemote(normalizedLegacy)) {
+            await serversApi.setManagedServers(normalizedLegacy);
+            localStorage.removeItem(LEGACY_STORAGE_KEY);
+            loaded = normalizedLegacy;
+            console.info("[ServerContext] Migrated legacy servers from localStorage.");
+          }
+        }
+      } catch (error) {
+        console.warn("[ServerContext] Legacy migration failed:", error);
+      }
+
+      const normalized = resetRemoteStatusOnStartup(
+        ensureLocalServer(loaded ?? {})
+      );
+
+      if (!canceled) {
+        setServers(normalized);
+      }
+    };
+
+    void load();
+    return () => {
+      canceled = true;
+    };
+  }, []);
+
+  const persistServers = useCallback(async (next: ManagedServersMap) => {
+    try {
+      await serversApi.setManagedServers(next);
     } catch (error) {
-      console.error("[ServerContext] Failed to save current server to storage:", error);
+      console.error("[ServerContext] Failed to persist servers:", error);
+      toast.error("保存服务器列表失败");
     }
-  }, [currentServerId]);
+  }, []);
+
+  const updateServersAndPersist = useCallback(
+    (updater: (prev: ManagedServersMap) => ManagedServersMap) => {
+      setServers((prev) => {
+        const next = ensureLocalServer(updater(prev));
+        void persistServers(next);
+        return next;
+      });
+    },
+    [persistServers]
+  );
 
   // 更新服务器状态
   const updateServerStatus = useCallback(
@@ -280,21 +337,21 @@ export function ServerProvider({ children }: { children: React.ReactNode }) {
         id,
         createdAt: Date.now(),
       };
-      setServers((prev) => ({
+      updateServersAndPersist((prev) => ({
         ...prev,
         [id]: newServer,
       }));
     },
-    []
+    [updateServersAndPersist]
   );
 
   // 更新服务器
   const updateServer = useCallback((server: ManagedServer) => {
-    setServers((prev) => ({
+    updateServersAndPersist((prev) => ({
       ...prev,
       [server.id]: server,
     }));
-  }, []);
+  }, [updateServersAndPersist]);
 
   // 删除服务器（本地服务器不能删除）
   const removeServer = useCallback((serverId: string) => {
@@ -302,14 +359,14 @@ export function ServerProvider({ children }: { children: React.ReactNode }) {
       console.warn("[ServerContext] Cannot remove local server");
       return;
     }
-    setServers((prev) => {
+    updateServersAndPersist((prev) => {
       const next = { ...prev };
       delete next[serverId];
       return next;
     });
     // 如果删除的是当前选中的服务器，返回主页
     setCurrentServerId((prev) => (prev === serverId ? null : prev));
-  }, []);
+  }, [updateServersAndPersist]);
 
   // 刷新服务器列表（检查连接状态）
   const refreshServers = useCallback(async () => {

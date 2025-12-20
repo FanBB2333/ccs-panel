@@ -12,6 +12,7 @@ mod error;
 mod gemini_config;
 mod gemini_mcp;
 mod init_status;
+mod managed_servers;
 mod mcp;
 mod prompt;
 mod prompt_files;
@@ -32,6 +33,7 @@ pub use config::{get_claude_mcp_path, get_claude_settings_path, read_json_file};
 pub use database::Database;
 pub use deeplink::{import_provider_from_deeplink, parse_deeplink_url, DeepLinkImportRequest};
 pub use error::AppError;
+pub use managed_servers::{load_managed_servers, save_managed_servers, ManagedServer, ManagedServersMap};
 pub use mcp::{
     import_from_claude, import_from_codex, import_from_gemini, remove_server_from_claude,
     remove_server_from_codex, remove_server_from_gemini, sync_enabled_to_claude,
@@ -721,6 +723,9 @@ pub fn run() {
             commands::ssh_update_remote_provider,
             commands::ssh_switch_remote_provider,
             commands::ssh_delete_remote_provider,
+            // Managed servers list (server panel)
+            commands::get_managed_servers,
+            commands::set_managed_servers,
             // Server settings management
             commands::save_server_settings,
             commands::get_server_settings,
