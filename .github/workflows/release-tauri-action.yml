@@ -18,6 +18,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Install dependencies (Ubuntu)
         if: matrix.platform == 'ubuntu-22.04'
@@ -44,6 +46,44 @@ jobs:
       - name: Install dependencies
         run: pnpm install
 
+      - name: Compute release notes metadata
+        id: release_meta
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          current_tag="${GITHUB_REF_NAME}"
+          current_sha="$(git rev-parse HEAD)"
+
+          # Find the previous tag by semver-ish sorting (v* tags).
+          previous_tag=""
+          while IFS= read -r tag; do
+            [[ -z "$tag" ]] && continue
+            if [[ "$tag" != "$current_tag" ]]; then
+              previous_tag="$tag"
+              break
+            fi
+          done < <(git for-each-ref --sort=-v:refname --format='%(refname:short)' 'refs/tags/v*')
+
+          if [[ -n "$previous_tag" ]]; then
+            previous_sha="$(git rev-list -n 1 "$previous_tag")"
+            compare_url="https://github.com/${GITHUB_REPOSITORY}/compare/${previous_tag}...${current_tag}"
+            range_text="From ${previous_sha} to ${current_sha}"
+          else
+            previous_sha=""
+            compare_url="https://github.com/${GITHUB_REPOSITORY}/commits/${current_sha}"
+            range_text="Initial release (no previous tag). Current commit: ${current_sha}"
+          fi
+
+          {
+            echo "current_tag=${current_tag}"
+            echo "current_sha=${current_sha}"
+            echo "previous_tag=${previous_tag}"
+            echo "previous_sha=${previous_sha}"
+            echo "compare_url=${compare_url}"
+            echo "range_text=${range_text}"
+          } >> "$GITHUB_OUTPUT"
+
       - name: Build the app
         uses: tauri-apps/tauri-action@v0
         env:
@@ -51,6 +91,11 @@ jobs:
         with:
           tagName: ${{ github.ref_name }}
           releaseName: 'CCS Panel ${{ github.ref_name }}'
-          releaseBody: 'See the assets to download this version and install.'
+          releaseBody: |
+            Changes included: ${{ steps.release_meta.outputs.range_text }}
+
+            Compare: ${{ steps.release_meta.outputs.compare_url }}
+
+            Download the installer for your platform from Release Assets.
           releaseDraft: false
           prerelease: false
