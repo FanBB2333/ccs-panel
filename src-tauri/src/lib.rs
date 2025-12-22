@@ -718,6 +718,7 @@ pub fn run() {
             commands::ssh_get_status,
             commands::ssh_test_connection,
             commands::ssh_read_remote_config,
+            commands::ssh_read_remote_live_provider_settings,
             commands::ssh_execute,
             commands::ssh_add_remote_provider,
             commands::ssh_update_remote_provider,

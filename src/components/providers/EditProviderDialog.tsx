@@ -8,7 +8,8 @@ import {
   ProviderForm,
   type ProviderFormValues,
 } from "@/components/providers/forms/ProviderForm";
-import { providersApi, vscodeApi, type AppId } from "@/lib/api";
+import { providersApi, sshApi, vscodeApi, type AppId } from "@/lib/api";
+import { useServer } from "@/contexts/ServerContext";
 
 interface EditProviderDialogProps {
   open: boolean;
@@ -26,6 +27,7 @@ export function EditProviderDialog({
   appId,
 }: EditProviderDialogProps) {
   const { t } = useTranslation();
+  const { currentServer } = useServer();
 
   // 默认使用传入的 provider.settingsConfig，若当前编辑对象是"当前生效供应商"，则尝试读取实时配置替换初始值
   const [liveSettings, setLiveSettings] = useState<Record<
@@ -51,38 +53,54 @@ export function EditProviderDialog({
       }
 
       try {
-        const currentId = await providersApi.getCurrent(appId);
-        if (currentId && provider.id === currentId) {
-          try {
-            const live = (await vscodeApi.getLiveProviderSettings(
+        const isRemote =
+          currentServer &&
+          !currentServer.isLocal &&
+          currentServer.connectionType === "ssh";
+
+        if (isRemote) {
+          const remoteConfig = await sshApi.readRemoteConfig(
+            currentServer.id,
+            appId,
+          );
+          const currentId = remoteConfig.current_provider_id;
+          if (currentId && provider.id === currentId) {
+            const live = (await sshApi.readRemoteLiveProviderSettings(
+              currentServer.id,
               appId,
             )) as Record<string, unknown>;
             if (!cancelled && live && typeof live === "object") {
               setLiveSettings(live);
-              setHasLoadedLive(true);
-            }
-          } catch {
-            // 读取实时配置失败则回退到 SSOT（不打断编辑流程）
-            if (!cancelled) {
-              setLiveSettings(null);
-              setHasLoadedLive(true);
             }
           }
-        } else {
-          if (!cancelled) {
-            setLiveSettings(null);
-            setHasLoadedLive(true);
+          return;
+        }
+
+        const currentId = await providersApi.getCurrent(appId);
+        if (currentId && provider.id === currentId) {
+          const live = (await vscodeApi.getLiveProviderSettings(
+            appId,
+          )) as Record<string, unknown>;
+          if (!cancelled && live && typeof live === "object") {
+            setLiveSettings(live);
           }
         }
+      } catch {
+        // 读取实时配置失败则回退到 SSOT（不打断编辑流程）
+        if (!cancelled) {
+          setLiveSettings(null);
+        }
       } finally {
-        // no-op
+        if (!cancelled) {
+          setHasLoadedLive(true);
+        }
       }
     };
     void load();
     return () => {
       cancelled = true;
     };
-  }, [open, provider?.id, appId, hasLoadedLive]); // 只依赖 provider.id，不依赖整个 provider 对象
+  }, [open, provider?.id, appId, hasLoadedLive, currentServer]); // 只依赖 provider.id，不依赖整个 provider 对象
 
   const initialSettingsConfig = useMemo(() => {
     return (liveSettings ?? provider?.settingsConfig ?? {}) as Record<

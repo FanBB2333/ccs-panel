@@ -137,6 +137,20 @@ pub async fn ssh_read_remote_config(
         .map_err(ssh_error_to_string)
 }
 
+/// 读取远程服务器上的当前生效 Live 配置（Claude/Codex/Gemini）
+#[tauri::command]
+pub async fn ssh_read_remote_live_provider_settings(
+    state: State<'_, AppState>,
+    server_id: String,
+    app_type: String,
+) -> Result<serde_json::Value, String> {
+    state
+        .ssh_service
+        .read_remote_live_settings(&server_id, &app_type)
+        .await
+        .map_err(ssh_error_to_string)
+}
+
 /// 在远程服务器执行命令
 #[tauri::command]
 pub async fn ssh_execute(

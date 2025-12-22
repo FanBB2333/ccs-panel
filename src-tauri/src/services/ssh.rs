@@ -732,7 +732,7 @@ impl SshService {
                 log::info!("[write_remote_live_config] Wrote Claude settings.json to {}", settings_path);
             }
             "codex" => {
-                // Codex: Write auth.json and config.md separately
+                // Codex: Write auth.json and config.toml separately
                 let codex_dir = crate::server_settings::get_server_codex_config_dir(server_id)
                     .unwrap_or_else(|| "~/.codex".to_string());
                 let obj = settings_config.as_object().ok_or_else(|| {
@@ -757,19 +757,19 @@ impl SshService {
                     log::info!("[write_remote_live_config] Wrote Codex auth.json to {}", auth_path);
                 }
 
-                // Write config (config.md or similar)
+                // Write config.toml (optional)
                 if let Some(config) = obj.get("config").and_then(|v| v.as_str()) {
                     let mkdir_cmd = format!("mkdir -p {}", Self::quote_path_for_shell(&codex_dir));
                     self.execute(server_id, &mkdir_cmd).await?;
 
-                    let config_path = format!("{}/config.md", codex_dir);
+                    let config_path = format!("{}/config.toml", codex_dir);
                     let cmd = format!(
                         "cat > {} << 'EOFCONFIG'\n{}\nEOFCONFIG",
                         Self::quote_path_for_shell(&config_path),
                         config
                     );
                     self.execute(server_id, &cmd).await?;
-                    log::info!("[write_remote_live_config] Wrote Codex config.md to {}", config_path);
+                    log::info!("[write_remote_live_config] Wrote Codex config.toml to {}", config_path);
                 }
             }
             "gemini" => {
@@ -807,6 +807,130 @@ impl SshService {
         }
 
         Ok(())
+    }
+
+    async fn remote_file_exists(&self, server_id: &str, path: &str) -> bool {
+        let quoted_path = Self::quote_path_for_shell(path);
+        let check_cmd = format!("test -f {} && echo 'exists'", quoted_path);
+        self.execute(server_id, &check_cmd)
+            .await
+            .ok()
+            .is_some_and(|out| out.trim() == "exists")
+    }
+
+    /// 读取远程服务器上的 Live 配置文件内容（Claude/Codex/Gemini）
+    ///
+    /// 返回结构与本地 `read_live_provider_settings` 一致：
+    /// - claude: settings.json (or claude.json)
+    /// - codex: { auth: <json>, config: <toml text> }
+    /// - gemini: { env: <object>, config: <object> }
+    pub async fn read_remote_live_settings(
+        &self,
+        server_id: &str,
+        app_type: &str,
+    ) -> Result<serde_json::Value, SshError> {
+        match app_type {
+            "claude" => {
+                let claude_dir = crate::server_settings::get_server_claude_config_dir(server_id)
+                    .unwrap_or_else(|| "~/.claude".to_string());
+
+                let settings_path = format!("{}/settings.json", claude_dir);
+                let legacy_path = format!("{}/claude.json", claude_dir);
+                let target_path = if self.remote_file_exists(server_id, &settings_path).await {
+                    settings_path
+                } else if self.remote_file_exists(server_id, &legacy_path).await {
+                    legacy_path
+                } else {
+                    return Err(SshError::FileReadFailed(
+                        "Claude settings file is missing".to_string(),
+                    ));
+                };
+
+                let quoted_path = Self::quote_path_for_shell(&target_path);
+                let content = self
+                    .execute(server_id, &format!("cat {}", quoted_path))
+                    .await?;
+                let value: serde_json::Value = serde_json::from_str(&content).map_err(|e| {
+                    SshError::FileReadFailed(format!("Failed to parse Claude settings.json: {e}"))
+                })?;
+                Ok(value)
+            }
+            "codex" => {
+                let codex_dir = crate::server_settings::get_server_codex_config_dir(server_id)
+                    .unwrap_or_else(|| "~/.codex".to_string());
+
+                let auth_path = format!("{}/auth.json", codex_dir);
+                if !self.remote_file_exists(server_id, &auth_path).await {
+                    return Err(SshError::FileReadFailed(
+                        "Codex configuration missing: auth.json not found".to_string(),
+                    ));
+                }
+
+                let quoted_auth_path = Self::quote_path_for_shell(&auth_path);
+                let auth_text = self
+                    .execute(server_id, &format!("cat {}", quoted_auth_path))
+                    .await?;
+
+                let auth_text = auth_text.strip_prefix('\u{feff}').unwrap_or(&auth_text);
+                let auth: serde_json::Value = serde_json::from_str(auth_text).map_err(|e| {
+                    SshError::FileReadFailed(format!("Failed to parse Codex auth.json: {e}"))
+                })?;
+
+                let config_path = format!("{}/config.toml", codex_dir);
+                let config_text = if self.remote_file_exists(server_id, &config_path).await {
+                    let quoted_config_path = Self::quote_path_for_shell(&config_path);
+                    self.execute(server_id, &format!("cat {}", quoted_config_path))
+                        .await
+                        .unwrap_or_default()
+                } else {
+                    String::new()
+                };
+
+                Ok(serde_json::json!({ "auth": auth, "config": config_text }))
+            }
+            "gemini" => {
+                let gemini_dir = crate::server_settings::get_server_gemini_config_dir(server_id)
+                    .unwrap_or_else(|| "~/.gemini".to_string());
+
+                let env_path = format!("{}/.env", gemini_dir);
+                if !self.remote_file_exists(server_id, &env_path).await {
+                    return Err(SshError::FileReadFailed(
+                        "Gemini .env file not found".to_string(),
+                    ));
+                }
+                let quoted_env_path = Self::quote_path_for_shell(&env_path);
+                let env_text = self
+                    .execute(server_id, &format!("cat {}", quoted_env_path))
+                    .await?;
+                let env_map = crate::gemini_config::parse_env_file(&env_text);
+                let env_json = crate::gemini_config::env_to_json(&env_map);
+                let env_obj = env_json
+                    .get("env")
+                    .cloned()
+                    .unwrap_or_else(|| serde_json::json!({}));
+
+                let settings_path = format!("{}/settings.json", gemini_dir);
+                let config_obj = if self.remote_file_exists(server_id, &settings_path).await {
+                    let quoted_settings_path = Self::quote_path_for_shell(&settings_path);
+                    let cfg_text = self
+                        .execute(server_id, &format!("cat {}", quoted_settings_path))
+                        .await?;
+                    serde_json::from_str::<serde_json::Value>(&cfg_text).map_err(|e| {
+                        SshError::FileReadFailed(format!(
+                            "Failed to parse Gemini settings.json: {e}"
+                        ))
+                    })?
+                } else {
+                    serde_json::json!({})
+                };
+
+                Ok(serde_json::json!({ "env": env_obj, "config": config_obj }))
+            }
+            _ => Err(SshError::InvalidConfig(format!(
+                "Unknown app_type: {}",
+                app_type
+            ))),
+        }
     }
 
     /// 设置远程代理目标供应商

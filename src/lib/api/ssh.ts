@@ -75,6 +75,17 @@ export const sshApi = {
   },
 
   /**
+   * 读取远程服务器上的当前生效 Live 配置（Claude/Codex/Gemini）
+   * 返回结构与本地 `read_live_provider_settings` 一致
+   */
+  readRemoteLiveProviderSettings: async (
+    serverId: string,
+    appType: string
+  ): Promise<unknown> => {
+    return invoke("ssh_read_remote_live_provider_settings", { serverId, appType });
+  },
+
+  /**
    * 在远程服务器执行命令
    */
   execute: async (serverId: string, command: string): Promise<string> => {
