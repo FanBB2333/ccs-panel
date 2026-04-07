@@ -1,6 +1,6 @@
 {
   "name": "ccs-panel",
-  "version": "0.2.2",
+  "version": "0.3.0",
   "description": "All-in-One Assistant for Claude Code, Codex & Gemini CLI",
   "type": "module",
   "scripts": {
