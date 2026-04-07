@@ -1,4 +1,4 @@
-use super::provider::ProviderService;
+use super::provider::{sanitize_claude_settings_for_live, ProviderService};
 use crate::app_config::{AppType, MultiAppConfig};
 use crate::error::AppError;
 use crate::provider::Provider;
@@ -122,6 +122,14 @@ impl ConfigService {
             AppType::Codex => Self::sync_codex_live(config, &current_id, &provider)?,
             AppType::Claude => Self::sync_claude_live(config, &current_id, &provider)?,
             AppType::Gemini => Self::sync_gemini_live(config, &current_id, &provider)?,
+            AppType::OpenCode => {
+                // OpenCode uses additive mode, no live sync needed
+                // OpenCode providers are managed directly in the config file
+            }
+            AppType::OpenClaw => {
+                // OpenClaw uses additive mode, no live sync needed
+                // OpenClaw providers are managed directly in the config file
+            }
         }
 
         Ok(())
@@ -146,7 +154,9 @@ impl ConfigService {
         let cfg_text = settings.get("config").and_then(Value::as_str);
 
         crate::codex_config::write_codex_live_atomic(auth, cfg_text)?;
-        crate::mcp::sync_enabled_to_codex(config)?;
+        // 注意：MCP 同步在 v3.7.0 中已通过 McpService 进行，不再在此调用
+        // sync_enabled_to_codex 使用旧的 config.mcp.codex 结构，在新架构中为空
+        // MCP 的启用/禁用应通过 McpService::toggle_app 进行
 
         let cfg_text_after = crate::codex_config::read_and_validate_codex_config_text()?;
         if let Some(manager) = config.get_manager_mut(&AppType::Codex) {
@@ -175,7 +185,8 @@ impl ConfigService {
             fs::create_dir_all(parent).map_err(|e| AppError::io(parent, e))?;
         }
 
-        write_json_file(&settings_path, &provider.settings_config)?;
+        let settings = sanitize_claude_settings_for_live(&provider.settings_config);
+        write_json_file(&settings_path, &settings)?;
 
         let live_after = read_json_file::<serde_json::Value>(&settings_path)?;
         if let Some(manager) = config.get_manager_mut(&AppType::Claude) {

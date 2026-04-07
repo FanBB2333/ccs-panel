@@ -74,6 +74,7 @@ command = "say"
                 claude: false,
                 codex: true, // 启用 Codex
                 gemini: false,
+                opencode: false,
             },
             description: None,
             homepage: None,

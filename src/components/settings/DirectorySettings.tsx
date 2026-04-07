@@ -15,6 +15,7 @@ interface DirectorySettingsProps {
   claudeDir?: string;
   codexDir?: string;
   geminiDir?: string;
+  opencodeDir?: string;
   onDirectoryChange: (app: AppId, value?: string) => void;
   onBrowseDirectory: (app: AppId) => Promise<void>;
   onResetDirectory: (app: AppId) => Promise<void>;
@@ -29,6 +30,7 @@ export function DirectorySettings({
   claudeDir,
   codexDir,
   geminiDir,
+  opencodeDir,
   onDirectoryChange,
   onBrowseDirectory,
   onResetDirectory,
@@ -36,7 +38,7 @@ export function DirectorySettings({
   const { t } = useTranslation();
 
   return (
-    <>
+    <div className="space-y-6">
       {/* CC Switch 配置目录 - 独立区块 */}
       <section className="space-y-4">
         <header className="space-y-1">
@@ -117,8 +119,19 @@ export function DirectorySettings({
           onBrowse={() => onBrowseDirectory("gemini")}
           onReset={() => onResetDirectory("gemini")}
         />
+
+        <DirectoryInput
+          label={t("settings.opencodeConfigDir")}
+          description={undefined}
+          value={opencodeDir}
+          resolvedValue={resolvedDirs.opencode}
+          placeholder={t("settings.browsePlaceholderOpencode")}
+          onChange={(val) => onDirectoryChange("opencode", val)}
+          onBrowse={() => onBrowseDirectory("opencode")}
+          onReset={() => onResetDirectory("opencode")}
+        />
       </section>
-    </>
+    </div>
   );
 }
 

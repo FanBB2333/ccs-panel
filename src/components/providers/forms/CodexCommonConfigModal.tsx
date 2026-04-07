@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from "react";
-import { Save } from "lucide-react";
+import { Save, Download, Loader2 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { FullScreenPanel } from "@/components/common/FullScreenPanel";
 import { Button } from "@/components/ui/button";
@@ -9,8 +9,10 @@ interface CodexCommonConfigModalProps {
   isOpen: boolean;
   onClose: () => void;
   value: string;
-  onChange: (value: string) => void;
+  onSave: (value: string) => boolean;
   error?: string;
+  onExtract?: () => void;
+  isExtracting?: boolean;
 }
 
 /**
@@ -21,11 +23,14 @@ export const CodexCommonConfigModal: React.FC<CodexCommonConfigModalProps> = ({
   isOpen,
   onClose,
   value,
-  onChange,
+  onSave,
   error,
+  onExtract,
+  isExtracting,
 }) => {
   const { t } = useTranslation();
   const [isDarkMode, setIsDarkMode] = useState(false);
+  const [draftValue, setDraftValue] = useState(value);
 
   useEffect(() => {
     setIsDarkMode(document.documentElement.classList.contains("dark"));
@@ -42,17 +47,52 @@ export const CodexCommonConfigModal: React.FC<CodexCommonConfigModalProps> = ({
     return () => observer.disconnect();
   }, []);
 
+  useEffect(() => {
+    if (isOpen) {
+      setDraftValue(value);
+    }
+  }, [isOpen, value]);
+
+  const handleClose = () => {
+    setDraftValue(value);
+    onClose();
+  };
+
+  const handleSave = () => {
+    if (onSave(draftValue)) {
+      onClose();
+    }
+  };
+
   return (
     <FullScreenPanel
       isOpen={isOpen}
       title={t("codexConfig.editCommonConfigTitle")}
-      onClose={onClose}
+      onClose={handleClose}
       footer={
         <>
-          <Button type="button" variant="outline" onClick={onClose}>
+          {onExtract && (
+            <Button
+              type="button"
+              variant="outline"
+              onClick={onExtract}
+              disabled={isExtracting}
+              className="gap-2"
+            >
+              {isExtracting ? (
+                <Loader2 className="w-4 h-4 animate-spin" />
+              ) : (
+                <Download className="w-4 h-4" />
+              )}
+              {t("codexConfig.extractFromCurrent", {
+                defaultValue: "从编辑内容提取",
+              })}
+            </Button>
+          )}
+          <Button type="button" variant="outline" onClick={handleClose}>
             {t("common.cancel")}
           </Button>
-          <Button type="button" onClick={onClose} className="gap-2">
+          <Button type="button" onClick={handleSave} className="gap-2">
             <Save className="w-4 h-4" />
             {t("common.save")}
           </Button>
@@ -65,8 +105,8 @@ export const CodexCommonConfigModal: React.FC<CodexCommonConfigModalProps> = ({
         </p>
 
         <JsonEditor
-          value={value}
-          onChange={onChange}
+          value={draftValue}
+          onChange={setDraftValue}
           placeholder={`# Common Codex config
 
 # Add your common TOML configuration here`}

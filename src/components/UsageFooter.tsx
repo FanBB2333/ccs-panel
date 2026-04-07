@@ -11,6 +11,7 @@ interface UsageFooterProps {
   appId: AppId;
   usageEnabled: boolean; // 是否启用了用量查询
   isCurrent: boolean; // 是否为当前激活的供应商
+  isInConfig?: boolean; // OpenCode: 是否已添加到配置
   inline?: boolean; // 是否内联显示（在按钮左侧）
 }
 
@@ -20,12 +21,15 @@ const UsageFooter: React.FC<UsageFooterProps> = ({
   appId,
   usageEnabled,
   isCurrent,
+  isInConfig = false,
   inline = false,
 }) => {
   const { t } = useTranslation();
 
   // 统一的用量查询（自动查询仅对当前激活的供应商启用）
-  const autoQueryInterval = isCurrent
+  // OpenCode（累加模式）：使用 isInConfig 代替 isCurrent
+  const shouldAutoQuery = appId === "opencode" ? isInConfig : isCurrent;
+  const autoQueryInterval = shouldAutoQuery
     ? provider.meta?.usage_script?.autoQueryInterval || 0
     : 0;
 
@@ -114,7 +118,7 @@ const UsageFooter: React.FC<UsageFooterProps> = ({
         {/* 第一行：更新时间和刷新按钮 */}
         <div className="flex items-center gap-2 justify-end">
           {/* 上次查询时间 */}
-          <span className="text-[10px] text-gray-400 dark:text-gray-500 flex items-center gap-1">
+          <span className="text-[10px] text-muted-foreground/70 flex items-center gap-1">
             <Clock size={10} />
             {lastQueriedAt
               ? formatRelativeTime(lastQueriedAt, now, t)
@@ -128,7 +132,7 @@ const UsageFooter: React.FC<UsageFooterProps> = ({
               refetch();
             }}
             disabled={loading}
-            className="p-1 rounded hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors disabled:opacity-50 flex-shrink-0 text-gray-400 dark:text-gray-500"
+            className="p-1 rounded hover:bg-muted transition-colors disabled:opacity-50 flex-shrink-0 text-muted-foreground"
             title={t("usage.refreshUsage")}
           >
             <RefreshCw size={12} className={loading ? "animate-spin" : ""} />
@@ -176,6 +180,16 @@ const UsageFooter: React.FC<UsageFooterProps> = ({
               {firstUsage.unit}
             </span>
           )}
+
+          {/* 扩展字段 extra */}
+          {firstUsage.extra && (
+            <span
+              className="text-gray-500 dark:text-gray-400 truncate max-w-[150px]"
+              title={firstUsage.extra}
+            >
+              {firstUsage.extra}
+            </span>
+          )}
         </div>
       </div>
     );
@@ -191,7 +205,7 @@ const UsageFooter: React.FC<UsageFooterProps> = ({
         <div className="flex items-center gap-2">
           {/* 自动查询时间提示 */}
           {lastQueriedAt && (
-            <span className="text-[10px] text-gray-400 dark:text-gray-500 flex items-center gap-1">
+            <span className="text-[10px] text-muted-foreground/70 flex items-center gap-1">
               <Clock size={10} />
               {formatRelativeTime(lastQueriedAt, now, t)}
             </span>

@@ -21,17 +21,34 @@ use crate::settings::CustomEndpoint;
 use crate::store::AppState;
 
 // Re-export sub-module functions for external access
-pub use live::{import_default_config, read_live_settings, sync_current_to_live};
+pub use live::{
+    import_default_config, import_openclaw_providers_from_live,
+    import_opencode_providers_from_live, read_live_settings, sync_current_to_live,
+};
 
 // Internal re-exports (pub(crate))
-pub(crate) use live::write_live_snapshot;
+pub(crate) use live::sanitize_claude_settings_for_live;
+pub(crate) use live::{
+    build_effective_settings_with_common_config, normalize_provider_common_config_for_storage,
+    strip_common_config_from_live_settings, sync_current_provider_for_app_to_live,
+    write_live_snapshot, write_live_with_common_config,
+};
 
 // Internal re-exports
-use live::write_gemini_live;
+use live::{
+    remove_openclaw_provider_from_live, remove_opencode_provider_from_live, write_gemini_live,
+};
 use usage::validate_usage_script;
 
 /// Provider business logic service
 pub struct ProviderService;
+
+/// Result of a provider switch operation, including any non-fatal warnings
+#[derive(Debug, serde::Serialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct SwitchResult {
+    pub warnings: Vec<String>,
+}
 
 #[cfg(test)]
 mod tests {
@@ -72,6 +89,47 @@ mod tests {
         assert_eq!(api_key, "token");
         assert_eq!(base_url, "https://claude.example");
     }
+
+    #[test]
+    fn extract_codex_common_config_preserves_mcp_servers_base_url() {
+        let config_toml = r#"model_provider = "azure"
+model = "gpt-4"
+disable_response_storage = true
+
+[model_providers.azure]
+name = "Azure OpenAI"
+base_url = "https://azure.example/v1"
+wire_api = "responses"
+
+[mcp_servers.my_server]
+base_url = "http://localhost:8080"
+"#;
+
+        let settings = json!({ "config": config_toml });
+        let extracted = ProviderService::extract_codex_common_config(&settings)
+            .expect("extract_codex_common_config should succeed");
+
+        assert!(
+            !extracted
+                .lines()
+                .any(|line| line.trim_start().starts_with("model_provider")),
+            "should remove top-level model_provider"
+        );
+        assert!(
+            !extracted
+                .lines()
+                .any(|line| line.trim_start().starts_with("model =")),
+            "should remove top-level model"
+        );
+        assert!(
+            !extracted.contains("[model_providers"),
+            "should remove entire model_providers table"
+        );
+        assert!(
+            extracted.contains("http://localhost:8080"),
+            "should keep mcp_servers.* base_url"
+        );
+    }
 }
 
 impl ProviderService {
@@ -97,7 +155,13 @@ impl ProviderService {
     /// 使用有效的当前供应商 ID（验证过存在性）。
     /// 优先从本地 settings 读取，验证后 fallback 到数据库的 is_current 字段。
     /// 这确保了云同步场景下多设备可以独立选择供应商，且返回的 ID 一定有效。
+    ///
+    /// 对于累加模式应用（OpenCode, OpenClaw），不存在"当前供应商"概念，直接返回空字符串。
     pub fn current(state: &AppState, app_type: AppType) -> Result<String, AppError> {
+        // Additive mode apps have no "current" provider concept
+        if app_type.is_additive_mode() {
+            return Ok(String::new());
+        }
         crate::settings::get_effective_current_provider(&state.db, &app_type)
             .map(|opt| opt.unwrap_or_default())
     }
@@ -108,18 +172,33 @@ impl ProviderService {
         // Normalize Claude model keys
         Self::normalize_provider_if_claude(&app_type, &mut provider);
         Self::validate_provider_settings(&app_type, &provider)?;
+        normalize_provider_common_config_for_storage(state.db.as_ref(), &app_type, &mut provider)?;
 
         // Save to database
         state.db.save_provider(app_type.as_str(), &provider)?;
 
-        // Check if sync is needed (if this is current provider, or no current provider)
+        // Additive mode apps (OpenCode, OpenClaw) - always write to live config
+        if app_type.is_additive_mode() {
+            // OMO / OMO Slim providers use exclusive mode and write to dedicated config file.
+            if matches!(app_type, AppType::OpenCode)
+                && matches!(provider.category.as_deref(), Some("omo") | Some("omo-slim"))
+            {
+                // Do not auto-enable newly added OMO / OMO Slim providers.
+                // Users must explicitly switch/apply an OMO provider to activate it.
+                return Ok(true);
+            }
+            write_live_with_common_config(state.db.as_ref(), &app_type, &provider)?;
+            return Ok(true);
+        }
+
+        // For other apps: Check if sync is needed (if this is current provider, or no current provider)
         let current = state.db.get_current_provider(app_type.as_str())?;
         if current.is_none() {
             // No current provider, set as current and sync
             state
                 .db
                 .set_current_provider(app_type.as_str(), &provider.id)?;
-            write_live_snapshot(&app_type, &provider)?;
+            write_live_with_common_config(state.db.as_ref(), &app_type, &provider)?;
         }
 
         Ok(true)
@@ -135,19 +214,76 @@ impl ProviderService {
         // Normalize Claude model keys
         Self::normalize_provider_if_claude(&app_type, &mut provider);
         Self::validate_provider_settings(&app_type, &provider)?;
-
-        // Check if this is current provider (use effective current, not just DB)
-        let effective_current =
-            crate::settings::get_effective_current_provider(&state.db, &app_type)?;
-        let is_current = effective_current.as_deref() == Some(provider.id.as_str());
+        normalize_provider_common_config_for_storage(state.db.as_ref(), &app_type, &mut provider)?;
 
         // Save to database
         state.db.save_provider(app_type.as_str(), &provider)?;
 
+        // Additive mode apps (OpenCode, OpenClaw) - always update in live config
+        if app_type.is_additive_mode() {
+            if matches!(app_type, AppType::OpenCode) && provider.category.as_deref() == Some("omo")
+            {
+                let is_omo_current =
+                    state
+                        .db
+                        .is_omo_provider_current(app_type.as_str(), &provider.id, "omo")?;
+                if is_omo_current {
+                    crate::services::OmoService::write_config_to_file(
+                        state,
+                        &crate::services::omo::STANDARD,
+                    )?;
+                }
+                return Ok(true);
+            }
+            if matches!(app_type, AppType::OpenCode)
+                && provider.category.as_deref() == Some("omo-slim")
+            {
+                let is_current = state.db.is_omo_provider_current(
+                    app_type.as_str(),
+                    &provider.id,
+                    "omo-slim",
+                )?;
+                if is_current {
+                    crate::services::OmoService::write_config_to_file(
+                        state,
+                        &crate::services::omo::SLIM,
+                    )?;
+                }
+                return Ok(true);
+            }
+            write_live_with_common_config(state.db.as_ref(), &app_type, &provider)?;
+            return Ok(true);
+        }
+
+        // For other apps: Check if this is current provider (use effective current, not just DB)
+        let effective_current =
+            crate::settings::get_effective_current_provider(&state.db, &app_type)?;
+        let is_current = effective_current.as_deref() == Some(provider.id.as_str());
+
         if is_current {
-            write_live_snapshot(&app_type, &provider)?;
-            // Sync MCP
-            McpService::sync_all_enabled(state)?;
+            // 如果代理接管模式处于激活状态，并且代理服务正在运行：
+            // - 不写 Live 配置（否则会破坏接管）
+            // - 仅更新 Live 备份（保证关闭代理时能恢复到最新配置）
+            let is_app_taken_over =
+                futures::executor::block_on(state.db.get_live_backup(app_type.as_str()))
+                    .ok()
+                    .flatten()
+                    .is_some();
+            let is_proxy_running = futures::executor::block_on(state.proxy_service.is_running());
+            let should_skip_live_write = is_app_taken_over && is_proxy_running;
+
+            if should_skip_live_write {
+                futures::executor::block_on(
+                    state
+                        .proxy_service
+                        .update_live_backup_from_provider(app_type.as_str(), &provider),
+                )
+                .map_err(|e| AppError::Message(format!("更新 Live 备份失败: {e}")))?;
+            } else {
+                write_live_with_common_config(state.db.as_ref(), &app_type, &provider)?;
+                // Sync MCP
+                McpService::sync_all_enabled(state)?;
+            }
         }
 
         Ok(true)
@@ -156,8 +292,58 @@ impl ProviderService {
     /// Delete a provider
     ///
     /// 同时检查本地 settings 和数据库的当前供应商，防止删除任一端正在使用的供应商。
+    /// 对于累加模式应用（OpenCode, OpenClaw），可以随时删除任意供应商，同时从 live 配置中移除。
     pub fn delete(state: &AppState, app_type: AppType, id: &str) -> Result<(), AppError> {
-        // Check both local settings and database
+        // Additive mode apps - no current provider concept
+        if app_type.is_additive_mode() {
+            if matches!(app_type, AppType::OpenCode) {
+                let provider_category = state
+                    .db
+                    .get_provider_by_id(id, app_type.as_str())?
+                    .and_then(|p| p.category);
+
+                if provider_category.as_deref() == Some("omo") {
+                    let was_current =
+                        state
+                            .db
+                            .is_omo_provider_current(app_type.as_str(), id, "omo")?;
+
+                    state.db.delete_provider(app_type.as_str(), id)?;
+                    if was_current {
+                        crate::services::OmoService::delete_config_file(
+                            &crate::services::omo::STANDARD,
+                        )?;
+                    }
+                    return Ok(());
+                }
+
+                if provider_category.as_deref() == Some("omo-slim") {
+                    let was_current =
+                        state
+                            .db
+                            .is_omo_provider_current(app_type.as_str(), id, "omo-slim")?;
+
+                    state.db.delete_provider(app_type.as_str(), id)?;
+                    if was_current {
+                        crate::services::OmoService::delete_config_file(
+                            &crate::services::omo::SLIM,
+                        )?;
+                    }
+                    return Ok(());
+                }
+            }
+            // Remove from database
+            state.db.delete_provider(app_type.as_str(), id)?;
+            // Also remove from live config
+            match app_type {
+                AppType::OpenCode => remove_opencode_provider_from_live(id)?,
+                AppType::OpenClaw => remove_openclaw_provider_from_live(id)?,
+                _ => {} // Should not reach here
+            }
+            return Ok(());
+        }
+
+        // For other apps: Check both local settings and database
         let local_current = crate::settings::get_current_provider(&app_type);
         let db_current = state.db.get_current_provider(app_type.as_str())?;
 
@@ -168,6 +354,76 @@ impl ProviderService {
         }
 
         state.db.delete_provider(app_type.as_str(), id)
+    }
+
+    /// Remove provider from live config only (for additive mode apps like OpenCode, OpenClaw)
+    ///
+    /// Does NOT delete from database - provider remains in the list.
+    /// This is used when user wants to "remove" a provider from active config
+    /// but keep it available for future use.
+    pub fn remove_from_live_config(
+        state: &AppState,
+        app_type: AppType,
+        id: &str,
+    ) -> Result<(), AppError> {
+        match app_type {
+            AppType::OpenCode => {
+                let provider_category = state
+                    .db
+                    .get_provider_by_id(id, app_type.as_str())?
+                    .and_then(|p| p.category);
+
+                if provider_category.as_deref() == Some("omo") {
+                    state
+                        .db
+                        .clear_omo_provider_current(app_type.as_str(), id, "omo")?;
+                    let still_has_current = state
+                        .db
+                        .get_current_omo_provider("opencode", "omo")?
+                        .is_some();
+                    if still_has_current {
+                        crate::services::OmoService::write_config_to_file(
+                            state,
+                            &crate::services::omo::STANDARD,
+                        )?;
+                    } else {
+                        crate::services::OmoService::delete_config_file(
+                            &crate::services::omo::STANDARD,
+                        )?;
+                    }
+                } else if provider_category.as_deref() == Some("omo-slim") {
+                    state
+                        .db
+                        .clear_omo_provider_current(app_type.as_str(), id, "omo-slim")?;
+                    let still_has_current = state
+                        .db
+                        .get_current_omo_provider("opencode", "omo-slim")?
+                        .is_some();
+                    if still_has_current {
+                        crate::services::OmoService::write_config_to_file(
+                            state,
+                            &crate::services::omo::SLIM,
+                        )?;
+                    } else {
+                        crate::services::OmoService::delete_config_file(
+                            &crate::services::omo::SLIM,
+                        )?;
+                    }
+                } else {
+                    remove_opencode_provider_from_live(id)?;
+                }
+            }
+            AppType::OpenClaw => {
+                remove_openclaw_provider_from_live(id)?;
+            }
+            _ => {
+                return Err(AppError::Message(format!(
+                    "App {} does not support remove from live config",
+                    app_type.as_str()
+                )));
+            }
+        }
+        Ok(())
     }
 
     /// Switch to a provider
@@ -182,22 +438,40 @@ impl ProviderService {
     ///    c. Update database is_current (as default for new devices)
     ///    d. Write target provider config to live files
     ///    e. Sync MCP configuration
-    pub fn switch(state: &AppState, app_type: AppType, id: &str) -> Result<(), AppError> {
+    pub fn switch(state: &AppState, app_type: AppType, id: &str) -> Result<SwitchResult, AppError> {
         // Check if provider exists
         let providers = state.db.get_all_providers(app_type.as_str())?;
         let _provider = providers
             .get(id)
             .ok_or_else(|| AppError::Message(format!("供应商 {id} 不存在")))?;
 
+        // OMO providers are switched through their own exclusive path.
+        if matches!(app_type, AppType::OpenCode) && _provider.category.as_deref() == Some("omo") {
+            return Self::switch_normal(state, app_type, id, &providers);
+        }
+
+        // OMO Slim providers are switched through their own exclusive path.
+        if matches!(app_type, AppType::OpenCode)
+            && _provider.category.as_deref() == Some("omo-slim")
+        {
+            return Self::switch_normal(state, app_type, id, &providers);
+        }
+
         // Check if proxy takeover mode is active AND proxy server is actually running
         // Both conditions must be true to use hot-switch mode
         // Use blocking wait since this is a sync function
-        let is_takeover_flag =
-            futures::executor::block_on(state.db.is_live_takeover_active()).unwrap_or(false);
+        let is_app_taken_over =
+            futures::executor::block_on(state.db.get_live_backup(app_type.as_str()))
+                .ok()
+                .flatten()
+                .is_some();
         let is_proxy_running = futures::executor::block_on(state.proxy_service.is_running());
+        let live_taken_over = state
+            .proxy_service
+            .detect_takeover_in_live_config_for_app(&app_type);
 
-        // Hot-switch only when BOTH: takeover flag is set AND proxy server is actually running
-        let should_hot_switch = is_takeover_flag && is_proxy_running;
+        // Hot-switch only when BOTH: this app is taken over AND proxy server is actually running
+        let should_hot_switch = (is_app_taken_over || live_taken_over) && is_proxy_running;
 
         if should_hot_switch {
             // Proxy takeover mode: hot-switch only, don't write Live config
@@ -207,28 +481,39 @@ impl ProviderService {
                 id
             );
 
+            // 获取新供应商的完整配置（用于更新备份）
+            let provider = providers
+                .get(id)
+                .ok_or_else(|| AppError::Message(format!("供应商 {id} 不存在")))?;
+
             // Update database is_current
             state.db.set_current_provider(app_type.as_str(), id)?;
-
-            // 同时更新 is_proxy_target（代理路由器使用此字段选择供应商）
-            state.db.set_proxy_target_provider(app_type.as_str(), id)?;
 
             // Update local settings for consistency
             crate::settings::set_current_provider(&app_type, Some(id))?;
 
+            // 更新 Live 备份（确保代理关闭时恢复正确的供应商配置）
+            futures::executor::block_on(
+                state
+                    .proxy_service
+                    .update_live_backup_from_provider(app_type.as_str(), provider),
+            )
+            .map_err(|e| AppError::Message(format!("更新 Live 备份失败: {e}")))?;
+
+            // 关键修复：接管模式下切换供应商不会写回 Live 配置，
+            // 需要主动清理 Claude Live 中的“模型覆盖”字段，避免仍以旧模型名发起请求。
+            if matches!(app_type, AppType::Claude) {
+                if let Err(e) = state.proxy_service.cleanup_claude_model_overrides_in_live() {
+                    log::warn!("清理 Claude Live 模型字段失败（不影响切换结果）: {e}");
+                }
+            }
+
             // Note: No Live config write, no MCP sync
-            // The proxy server will route requests to the new provider via is_proxy_target
-            return Ok(());
+            // The proxy server will route requests to the new provider via is_current
+            return Ok(SwitchResult::default());
         }
 
         // Normal mode: full switch with Live config write
-        // Also clear stale takeover flag if proxy is not running but flag was set
-        if is_takeover_flag && !is_proxy_running {
-            log::warn!("检测到代理接管标志残留（代理已停止），清除标志并执行正常切换");
-            // Clear stale takeover flag
-            let _ = futures::executor::block_on(state.db.set_live_takeover_active(false));
-        }
-
         Self::switch_normal(state, app_type, id, &providers)
     }
 
@@ -238,10 +523,37 @@ impl ProviderService {
         app_type: AppType,
         id: &str,
         providers: &indexmap::IndexMap<String, Provider>,
-    ) -> Result<(), AppError> {
+    ) -> Result<SwitchResult, AppError> {
         let provider = providers
             .get(id)
             .ok_or_else(|| AppError::Message(format!("供应商 {id} 不存在")))?;
+
+        if matches!(app_type, AppType::OpenCode) && provider.category.as_deref() == Some("omo") {
+            state
+                .db
+                .set_omo_provider_current(app_type.as_str(), id, "omo")?;
+            crate::services::OmoService::write_config_to_file(
+                state,
+                &crate::services::omo::STANDARD,
+            )?;
+            // OMO ↔ OMO Slim mutually exclusive: remove Slim config
+            let _ = crate::services::OmoService::delete_config_file(&crate::services::omo::SLIM);
+            return Ok(SwitchResult::default());
+        }
+
+        if matches!(app_type, AppType::OpenCode) && provider.category.as_deref() == Some("omo-slim")
+        {
+            state
+                .db
+                .set_omo_provider_current(app_type.as_str(), id, "omo-slim")?;
+            crate::services::OmoService::write_config_to_file(state, &crate::services::omo::SLIM)?;
+            // OMO ↔ OMO Slim mutually exclusive: remove Standard config
+            let _ =
+                crate::services::OmoService::delete_config_file(&crate::services::omo::STANDARD);
+            return Ok(SwitchResult::default());
+        }
+
+        let mut result = SwitchResult::default();
 
         // Backfill: Backfill current live config to current provider
         // Use effective current provider (validated existence) to ensure backfill targets valid provider
@@ -249,47 +561,390 @@ impl ProviderService {
 
         if let Some(current_id) = current_id {
             if current_id != id {
-                // Only backfill when switching to a different provider
-                if let Ok(live_config) = read_live_settings(app_type.clone()) {
-                    if let Some(mut current_provider) = providers.get(&current_id).cloned() {
-                        current_provider.settings_config = live_config;
-                        // Ignore backfill failure, don't affect switch flow
-                        let _ = state.db.save_provider(app_type.as_str(), &current_provider);
+                // Additive mode apps - all providers coexist in the same file,
+                // no backfill needed (backfill is for exclusive mode apps like Claude/Codex/Gemini)
+                if !app_type.is_additive_mode() {
+                    // Only backfill when switching to a different provider
+                    if let Ok(live_config) = read_live_settings(app_type.clone()) {
+                        if let Some(mut current_provider) = providers.get(&current_id).cloned() {
+                            current_provider.settings_config =
+                                strip_common_config_from_live_settings(
+                                    state.db.as_ref(),
+                                    &app_type,
+                                    &current_provider,
+                                    live_config,
+                                );
+                            if let Err(e) =
+                                state.db.save_provider(app_type.as_str(), &current_provider)
+                            {
+                                log::warn!("Backfill failed: {e}");
+                                result
+                                    .warnings
+                                    .push(format!("backfill_failed:{current_id}"));
+                            }
+                        }
                     }
                 }
             }
         }
 
-        // Update local settings (device-level, takes priority)
-        crate::settings::set_current_provider(&app_type, Some(id))?;
+        // Additive mode apps skip setting is_current (no such concept)
+        if !app_type.is_additive_mode() {
+            // Update local settings (device-level, takes priority)
+            crate::settings::set_current_provider(&app_type, Some(id))?;
 
-        // Update database is_current (as default for new devices)
-        state.db.set_current_provider(app_type.as_str(), id)?;
+            // Update database is_current (as default for new devices)
+            state.db.set_current_provider(app_type.as_str(), id)?;
+        }
 
         // Sync to live (write_gemini_live handles security flag internally for Gemini)
-        write_live_snapshot(&app_type, provider)?;
+        write_live_with_common_config(state.db.as_ref(), &app_type, provider)?;
 
         // Sync MCP
         McpService::sync_all_enabled(state)?;
 
-        Ok(())
-    }
-
-    /// Set proxy target provider
-    pub fn set_proxy_target(state: &AppState, app_type: AppType, id: &str) -> Result<(), AppError> {
-        // Check if provider exists
-        let providers = state.db.get_all_providers(app_type.as_str())?;
-        if !providers.contains_key(id) {
-            return Err(AppError::Message(format!("供应商 {id} 不存在")));
-        }
-
-        state.db.set_proxy_target_provider(app_type.as_str(), id)?;
-        Ok(())
+        Ok(result)
     }
 
     /// Sync current provider to live configuration (re-export)
     pub fn sync_current_to_live(state: &AppState) -> Result<(), AppError> {
         sync_current_to_live(state)
+    }
+
+    pub fn sync_current_provider_for_app(
+        state: &AppState,
+        app_type: AppType,
+    ) -> Result<(), AppError> {
+        if app_type.is_additive_mode() {
+            return sync_current_provider_for_app_to_live(state, &app_type);
+        }
+
+        let current_id =
+            match crate::settings::get_effective_current_provider(&state.db, &app_type)? {
+                Some(id) => id,
+                None => return Ok(()),
+            };
+
+        let providers = state.db.get_all_providers(app_type.as_str())?;
+        let Some(provider) = providers.get(&current_id) else {
+            return Ok(());
+        };
+
+        let takeover_enabled =
+            futures::executor::block_on(state.db.get_proxy_config_for_app(app_type.as_str()))
+                .map(|config| config.enabled)
+                .unwrap_or(false);
+
+        let has_live_backup =
+            futures::executor::block_on(state.db.get_live_backup(app_type.as_str()))
+                .ok()
+                .flatten()
+                .is_some();
+
+        let live_taken_over = state
+            .proxy_service
+            .detect_takeover_in_live_config_for_app(&app_type);
+
+        if takeover_enabled && (has_live_backup || live_taken_over) {
+            futures::executor::block_on(
+                state
+                    .proxy_service
+                    .update_live_backup_from_provider(app_type.as_str(), provider),
+            )
+            .map_err(|e| AppError::Message(format!("更新 Live 备份失败: {e}")))?;
+            return Ok(());
+        }
+
+        sync_current_provider_for_app_to_live(state, &app_type)
+    }
+
+    pub fn migrate_legacy_common_config_usage(
+        state: &AppState,
+        app_type: AppType,
+        legacy_snippet: &str,
+    ) -> Result<(), AppError> {
+        if app_type.is_additive_mode() || legacy_snippet.trim().is_empty() {
+            return Ok(());
+        }
+
+        let providers = state.db.get_all_providers(app_type.as_str())?;
+
+        for provider in providers.values() {
+            if provider
+                .meta
+                .as_ref()
+                .and_then(|meta| meta.common_config_enabled)
+                .is_some()
+            {
+                continue;
+            }
+
+            if !live::provider_uses_common_config(&app_type, provider, Some(legacy_snippet)) {
+                continue;
+            }
+
+            let mut updated_provider = provider.clone();
+            updated_provider
+                .meta
+                .get_or_insert_with(Default::default)
+                .common_config_enabled = Some(true);
+
+            match live::remove_common_config_from_settings(
+                &app_type,
+                &updated_provider.settings_config,
+                legacy_snippet,
+            ) {
+                Ok(settings) => updated_provider.settings_config = settings,
+                Err(err) => {
+                    log::warn!(
+                        "Failed to normalize legacy common config for {} provider '{}': {err}",
+                        app_type.as_str(),
+                        updated_provider.id
+                    );
+                }
+            }
+
+            state
+                .db
+                .save_provider(app_type.as_str(), &updated_provider)?;
+        }
+
+        Ok(())
+    }
+
+    pub fn migrate_legacy_common_config_usage_if_needed(
+        state: &AppState,
+        app_type: AppType,
+    ) -> Result<(), AppError> {
+        if app_type.is_additive_mode() {
+            return Ok(());
+        }
+
+        let Some(snippet) = state.db.get_config_snippet(app_type.as_str())? else {
+            return Ok(());
+        };
+
+        if snippet.trim().is_empty() {
+            return Ok(());
+        }
+
+        Self::migrate_legacy_common_config_usage(state, app_type, &snippet)
+    }
+
+    /// Extract common config snippet from current provider
+    ///
+    /// Extracts the current provider's configuration and removes provider-specific fields
+    /// (API keys, model settings, endpoints) to create a reusable common config snippet.
+    pub fn extract_common_config_snippet(
+        state: &AppState,
+        app_type: AppType,
+    ) -> Result<String, AppError> {
+        // Get current provider
+        let current_id = Self::current(state, app_type.clone())?;
+        if current_id.is_empty() {
+            return Err(AppError::Message("No current provider".to_string()));
+        }
+
+        let providers = state.db.get_all_providers(app_type.as_str())?;
+        let provider = providers
+            .get(&current_id)
+            .ok_or_else(|| AppError::Message(format!("Provider {current_id} not found")))?;
+
+        match app_type {
+            AppType::Claude => Self::extract_claude_common_config(&provider.settings_config),
+            AppType::Codex => Self::extract_codex_common_config(&provider.settings_config),
+            AppType::Gemini => Self::extract_gemini_common_config(&provider.settings_config),
+            AppType::OpenCode => Self::extract_opencode_common_config(&provider.settings_config),
+            AppType::OpenClaw => Self::extract_openclaw_common_config(&provider.settings_config),
+        }
+    }
+
+    /// Extract common config snippet from a config value (e.g. editor content).
+    pub fn extract_common_config_snippet_from_settings(
+        app_type: AppType,
+        settings_config: &Value,
+    ) -> Result<String, AppError> {
+        match app_type {
+            AppType::Claude => Self::extract_claude_common_config(settings_config),
+            AppType::Codex => Self::extract_codex_common_config(settings_config),
+            AppType::Gemini => Self::extract_gemini_common_config(settings_config),
+            AppType::OpenCode => Self::extract_opencode_common_config(settings_config),
+            AppType::OpenClaw => Self::extract_openclaw_common_config(settings_config),
+        }
+    }
+
+    /// Extract common config for Claude (JSON format)
+    fn extract_claude_common_config(settings: &Value) -> Result<String, AppError> {
+        let mut config = settings.clone();
+
+        // Fields to exclude from common config
+        const ENV_EXCLUDES: &[&str] = &[
+            // Auth
+            "ANTHROPIC_API_KEY",
+            "ANTHROPIC_AUTH_TOKEN",
+            // Models (5 fields)
+            "ANTHROPIC_MODEL",
+            "ANTHROPIC_REASONING_MODEL",
+            "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+            "ANTHROPIC_DEFAULT_OPUS_MODEL",
+            "ANTHROPIC_DEFAULT_SONNET_MODEL",
+            // Endpoint
+            "ANTHROPIC_BASE_URL",
+        ];
+
+        const TOP_LEVEL_EXCLUDES: &[&str] = &[
+            "apiBaseUrl",
+            // Legacy model fields
+            "primaryModel",
+            "smallFastModel",
+        ];
+
+        // Remove env fields
+        if let Some(env) = config.get_mut("env").and_then(|v| v.as_object_mut()) {
+            for key in ENV_EXCLUDES {
+                env.remove(*key);
+            }
+            // If env is empty after removal, remove the env object itself
+            if env.is_empty() {
+                config.as_object_mut().map(|obj| obj.remove("env"));
+            }
+        }
+
+        // Remove top-level fields
+        if let Some(obj) = config.as_object_mut() {
+            for key in TOP_LEVEL_EXCLUDES {
+                obj.remove(*key);
+            }
+        }
+
+        // Check if result is empty
+        if config.as_object().is_none_or(|obj| obj.is_empty()) {
+            return Ok("{}".to_string());
+        }
+
+        serde_json::to_string_pretty(&config)
+            .map_err(|e| AppError::Message(format!("Serialization failed: {e}")))
+    }
+
+    /// Extract common config for Codex (TOML format)
+    fn extract_codex_common_config(settings: &Value) -> Result<String, AppError> {
+        // Codex config is stored as { "auth": {...}, "config": "toml string" }
+        let config_toml = settings
+            .get("config")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+
+        if config_toml.is_empty() {
+            return Ok(String::new());
+        }
+
+        let mut doc = config_toml
+            .parse::<toml_edit::DocumentMut>()
+            .map_err(|e| AppError::Message(format!("TOML parse error: {e}")))?;
+
+        // Remove provider-specific fields.
+        let root = doc.as_table_mut();
+        root.remove("model");
+        root.remove("model_provider");
+        // Legacy/alt formats might use a top-level base_url.
+        root.remove("base_url");
+
+        // Remove entire model_providers table (provider-specific configuration)
+        root.remove("model_providers");
+
+        // Clean up multiple empty lines (keep at most one blank line).
+        let mut cleaned = String::new();
+        let mut blank_run = 0usize;
+        for line in doc.to_string().lines() {
+            if line.trim().is_empty() {
+                blank_run += 1;
+                if blank_run <= 1 {
+                    cleaned.push('\n');
+                }
+                continue;
+            }
+            blank_run = 0;
+            cleaned.push_str(line);
+            cleaned.push('\n');
+        }
+
+        Ok(cleaned.trim().to_string())
+    }
+
+    /// Extract common config for Gemini (JSON format)
+    ///
+    /// Extracts `.env` values while excluding provider-specific credentials:
+    /// - GOOGLE_GEMINI_BASE_URL
+    /// - GEMINI_API_KEY
+    fn extract_gemini_common_config(settings: &Value) -> Result<String, AppError> {
+        let env = settings.get("env").and_then(|v| v.as_object());
+
+        let mut snippet = serde_json::Map::new();
+        if let Some(env) = env {
+            for (key, value) in env {
+                if key == "GOOGLE_GEMINI_BASE_URL" || key == "GEMINI_API_KEY" {
+                    continue;
+                }
+                let Value::String(v) = value else {
+                    continue;
+                };
+                let trimmed = v.trim();
+                if !trimmed.is_empty() {
+                    snippet.insert(key.to_string(), Value::String(trimmed.to_string()));
+                }
+            }
+        }
+
+        if snippet.is_empty() {
+            return Ok("{}".to_string());
+        }
+
+        serde_json::to_string_pretty(&Value::Object(snippet))
+            .map_err(|e| AppError::Message(format!("Serialization failed: {e}")))
+    }
+
+    /// Extract common config for OpenCode (JSON format)
+    fn extract_opencode_common_config(settings: &Value) -> Result<String, AppError> {
+        // OpenCode uses a different config structure with npm, options, models
+        // For common config, we exclude provider-specific fields like apiKey
+        let mut config = settings.clone();
+
+        // Remove provider-specific fields
+        if let Some(obj) = config.as_object_mut() {
+            if let Some(options) = obj.get_mut("options").and_then(|v| v.as_object_mut()) {
+                options.remove("apiKey");
+                options.remove("baseURL");
+            }
+            // Keep npm and models as they might be common
+        }
+
+        if config.is_null() || (config.is_object() && config.as_object().unwrap().is_empty()) {
+            return Ok("{}".to_string());
+        }
+
+        serde_json::to_string_pretty(&config)
+            .map_err(|e| AppError::Message(format!("Serialization failed: {e}")))
+    }
+
+    /// Extract common config for OpenClaw (JSON format)
+    fn extract_openclaw_common_config(settings: &Value) -> Result<String, AppError> {
+        // OpenClaw uses a different config structure with baseUrl, apiKey, api, models
+        // For common config, we exclude provider-specific fields like apiKey
+        let mut config = settings.clone();
+
+        // Remove provider-specific fields
+        if let Some(obj) = config.as_object_mut() {
+            obj.remove("apiKey");
+            obj.remove("baseUrl");
+            // Keep api and models as they might be common
+        }
+
+        if config.is_null() || (config.is_object() && config.as_object().unwrap().is_empty()) {
+            return Ok("{}".to_string());
+        }
+
+        serde_json::to_string_pretty(&config)
+            .map_err(|e| AppError::Message(format!("Serialization failed: {e}")))
     }
 
     /// Import default configuration from live files (re-export)
@@ -382,6 +1037,7 @@ impl ProviderService {
         base_url: Option<&str>,
         access_token: Option<&str>,
         user_id: Option<&str>,
+        template_type: Option<&str>,
     ) -> Result<UsageResult, AppError> {
         usage::test_usage_script(
             state,
@@ -393,6 +1049,7 @@ impl ProviderService {
             base_url,
             access_token,
             user_id,
+            template_type,
         )
         .await
     }
@@ -566,6 +1223,28 @@ impl ProviderService {
                 use crate::gemini_config::validate_gemini_settings;
                 validate_gemini_settings(&provider.settings_config)?
             }
+            AppType::OpenCode => {
+                // OpenCode uses a different config structure: { npm, options, models }
+                // Basic validation - must be an object
+                if !provider.settings_config.is_object() {
+                    return Err(AppError::localized(
+                        "provider.opencode.settings.not_object",
+                        "OpenCode 配置必须是 JSON 对象",
+                        "OpenCode configuration must be a JSON object",
+                    ));
+                }
+            }
+            AppType::OpenClaw => {
+                // OpenClaw uses config structure: { baseUrl, apiKey, api, models }
+                // Basic validation - must be an object
+                if !provider.settings_config.is_object() {
+                    return Err(AppError::localized(
+                        "provider.openclaw.settings.not_object",
+                        "OpenClaw 配置必须是 JSON 对象",
+                        "OpenClaw configuration must be a JSON object",
+                    ));
+                }
+            }
         }
 
         // Validate and clean UsageScript configuration (common for all app types)
@@ -703,6 +1382,64 @@ impl ProviderService {
 
                 Ok((api_key, base_url))
             }
+            AppType::OpenCode => {
+                // OpenCode uses options.apiKey and options.baseURL
+                let options = provider
+                    .settings_config
+                    .get("options")
+                    .and_then(|v| v.as_object())
+                    .ok_or_else(|| {
+                        AppError::localized(
+                            "provider.opencode.options.missing",
+                            "配置格式错误: 缺少 options",
+                            "Invalid configuration: missing options section",
+                        )
+                    })?;
+
+                let api_key = options
+                    .get("apiKey")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| {
+                        AppError::localized(
+                            "provider.opencode.api_key.missing",
+                            "缺少 API Key",
+                            "API key is missing",
+                        )
+                    })?
+                    .to_string();
+
+                let base_url = options
+                    .get("baseURL")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+
+                Ok((api_key, base_url))
+            }
+            AppType::OpenClaw => {
+                // OpenClaw uses apiKey and baseUrl directly on the object
+                let api_key = provider
+                    .settings_config
+                    .get("apiKey")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| {
+                        AppError::localized(
+                            "provider.openclaw.api_key.missing",
+                            "缺少 API Key",
+                            "API key is missing",
+                        )
+                    })?
+                    .to_string();
+
+                let base_url = provider
+                    .settings_config
+                    .get("baseUrl")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+
+                Ok((api_key, base_url))
+            }
         }
     }
 }
@@ -786,4 +1523,141 @@ pub struct ProviderSortUpdate {
     pub id: String,
     #[serde(rename = "sortIndex")]
     pub sort_index: usize,
+}
+
+// ============================================================================
+// 统一供应商（Universal Provider）服务方法
+// ============================================================================
+
+use crate::provider::UniversalProvider;
+use std::collections::HashMap;
+
+impl ProviderService {
+    /// 获取所有统一供应商
+    pub fn list_universal(
+        state: &AppState,
+    ) -> Result<HashMap<String, UniversalProvider>, AppError> {
+        state.db.get_all_universal_providers()
+    }
+
+    /// 获取单个统一供应商
+    pub fn get_universal(
+        state: &AppState,
+        id: &str,
+    ) -> Result<Option<UniversalProvider>, AppError> {
+        state.db.get_universal_provider(id)
+    }
+
+    /// 添加或更新统一供应商（不自动同步，需手动调用 sync_universal_to_apps）
+    pub fn upsert_universal(
+        state: &AppState,
+        provider: UniversalProvider,
+    ) -> Result<bool, AppError> {
+        // 保存统一供应商
+        state.db.save_universal_provider(&provider)?;
+
+        Ok(true)
+    }
+
+    /// 删除统一供应商
+    pub fn delete_universal(state: &AppState, id: &str) -> Result<bool, AppError> {
+        // 获取统一供应商（用于删除生成的子供应商）
+        let provider = state.db.get_universal_provider(id)?;
+
+        // 删除统一供应商
+        state.db.delete_universal_provider(id)?;
+
+        // 删除生成的子供应商
+        if let Some(p) = provider {
+            if p.apps.claude {
+                let claude_id = format!("universal-claude-{id}");
+                let _ = state.db.delete_provider("claude", &claude_id);
+            }
+            if p.apps.codex {
+                let codex_id = format!("universal-codex-{id}");
+                let _ = state.db.delete_provider("codex", &codex_id);
+            }
+            if p.apps.gemini {
+                let gemini_id = format!("universal-gemini-{id}");
+                let _ = state.db.delete_provider("gemini", &gemini_id);
+            }
+        }
+
+        Ok(true)
+    }
+
+    /// 同步统一供应商到各应用
+    pub fn sync_universal_to_apps(state: &AppState, id: &str) -> Result<bool, AppError> {
+        let provider = state
+            .db
+            .get_universal_provider(id)?
+            .ok_or_else(|| AppError::Message(format!("统一供应商 {id} 不存在")))?;
+
+        // 同步到 Claude
+        if let Some(mut claude_provider) = provider.to_claude_provider() {
+            // 合并已有配置
+            if let Some(existing) = state.db.get_provider_by_id(&claude_provider.id, "claude")? {
+                let mut merged = existing.settings_config.clone();
+                Self::merge_json(&mut merged, &claude_provider.settings_config);
+                claude_provider.settings_config = merged;
+            }
+            state.db.save_provider("claude", &claude_provider)?;
+        } else {
+            // 如果禁用了 Claude，删除对应的子供应商
+            let claude_id = format!("universal-claude-{id}");
+            let _ = state.db.delete_provider("claude", &claude_id);
+        }
+
+        // 同步到 Codex
+        if let Some(mut codex_provider) = provider.to_codex_provider() {
+            // 合并已有配置
+            if let Some(existing) = state.db.get_provider_by_id(&codex_provider.id, "codex")? {
+                let mut merged = existing.settings_config.clone();
+                Self::merge_json(&mut merged, &codex_provider.settings_config);
+                codex_provider.settings_config = merged;
+            }
+            state.db.save_provider("codex", &codex_provider)?;
+        } else {
+            let codex_id = format!("universal-codex-{id}");
+            let _ = state.db.delete_provider("codex", &codex_id);
+        }
+
+        // 同步到 Gemini
+        if let Some(mut gemini_provider) = provider.to_gemini_provider() {
+            // 合并已有配置
+            if let Some(existing) = state.db.get_provider_by_id(&gemini_provider.id, "gemini")? {
+                let mut merged = existing.settings_config.clone();
+                Self::merge_json(&mut merged, &gemini_provider.settings_config);
+                gemini_provider.settings_config = merged;
+            }
+            state.db.save_provider("gemini", &gemini_provider)?;
+        } else {
+            let gemini_id = format!("universal-gemini-{id}");
+            let _ = state.db.delete_provider("gemini", &gemini_id);
+        }
+
+        Ok(true)
+    }
+
+    /// 递归合并 JSON：base 为底，patch 覆盖同名字段
+    fn merge_json(base: &mut serde_json::Value, patch: &serde_json::Value) {
+        use serde_json::Value;
+
+        match (base, patch) {
+            (Value::Object(base_map), Value::Object(patch_map)) => {
+                for (k, v_patch) in patch_map {
+                    match base_map.get_mut(k) {
+                        Some(v_base) => Self::merge_json(v_base, v_patch),
+                        None => {
+                            base_map.insert(k.clone(), v_patch.clone());
+                        }
+                    }
+                }
+            }
+            // 其它类型：直接覆盖
+            (base_val, patch_val) => {
+                *base_val = patch_val.clone();
+            }
+        }
+    }
 }

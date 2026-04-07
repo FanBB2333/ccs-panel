@@ -432,6 +432,8 @@ type = "stdio"
       claude: false,
       codex: false,
       gemini: false,
+      opencode: false,
+      openclaw: false,
     });
     expect(onSave).toHaveBeenCalledTimes(1);
     expect(toastErrorMock).not.toHaveBeenCalled();

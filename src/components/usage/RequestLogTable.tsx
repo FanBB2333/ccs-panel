@@ -21,46 +21,152 @@ import { useRequestLogs, usageKeys } from "@/lib/query/usage";
 import { useQueryClient } from "@tanstack/react-query";
 import type { LogFilters } from "@/types/usage";
 import { ChevronLeft, ChevronRight, RefreshCw, Search, X } from "lucide-react";
+import {
+  fmtInt,
+  fmtUsd,
+  getLocaleFromLanguage,
+  parseFiniteNumber,
+} from "./format";
 
-export function RequestLogTable() {
-  const { t } = useTranslation();
+interface RequestLogTableProps {
+  refreshIntervalMs: number;
+}
+
+const ONE_DAY_SECONDS = 24 * 60 * 60;
+const MAX_FIXED_RANGE_SECONDS = 30 * ONE_DAY_SECONDS;
+
+type TimeMode = "rolling" | "fixed";
+
+export function RequestLogTable({ refreshIntervalMs }: RequestLogTableProps) {
+  const { t, i18n } = useTranslation();
   const queryClient = useQueryClient();
 
-  // 默认时间范围：过去24小时
-  const getDefaultFilters = (): LogFilters => {
+  const getRollingRange = () => {
     const now = Math.floor(Date.now() / 1000);
-    const oneDayAgo = now - 24 * 60 * 60;
+    const oneDayAgo = now - ONE_DAY_SECONDS;
     return { startDate: oneDayAgo, endDate: now };
   };
 
-  const [filters, setFilters] = useState<LogFilters>(getDefaultFilters);
-  const [tempFilters, setTempFilters] = useState<LogFilters>(getDefaultFilters);
+  const [appliedTimeMode, setAppliedTimeMode] = useState<TimeMode>("rolling");
+  const [draftTimeMode, setDraftTimeMode] = useState<TimeMode>("rolling");
+
+  const [appliedFilters, setAppliedFilters] = useState<LogFilters>({});
+  const [draftFilters, setDraftFilters] = useState<LogFilters>({});
   const [page, setPage] = useState(0);
   const pageSize = 20;
+  const [validationError, setValidationError] = useState<string | null>(null);
 
-  const { data: result, isLoading } = useRequestLogs(filters, page, pageSize);
+  const { data: result, isLoading } = useRequestLogs({
+    filters: appliedFilters,
+    timeMode: appliedTimeMode,
+    rollingWindowSeconds: ONE_DAY_SECONDS,
+    page,
+    pageSize,
+    options: {
+      refetchInterval: refreshIntervalMs > 0 ? refreshIntervalMs : false,
+    },
+  });
 
   const logs = result?.data ?? [];
   const total = result?.total ?? 0;
   const totalPages = Math.ceil(total / pageSize);
 
   const handleSearch = () => {
-    setFilters(tempFilters);
+    setValidationError(null);
+
+    if (draftTimeMode === "fixed") {
+      const start = draftFilters.startDate;
+      const end = draftFilters.endDate;
+
+      if (typeof start !== "number" || typeof end !== "number") {
+        setValidationError(
+          t("usage.invalidTimeRange", "请选择完整的开始/结束时间"),
+        );
+        return;
+      }
+
+      if (start > end) {
+        setValidationError(
+          t("usage.invalidTimeRangeOrder", "开始时间不能晚于结束时间"),
+        );
+        return;
+      }
+
+      if (end - start > MAX_FIXED_RANGE_SECONDS) {
+        setValidationError(
+          t("usage.timeRangeTooLarge", "时间范围过大，请缩小范围"),
+        );
+        return;
+      }
+    }
+
+    setAppliedTimeMode(draftTimeMode);
+    setAppliedFilters((prev) => {
+      const next = { ...prev, ...draftFilters };
+      if (draftTimeMode === "rolling") {
+        delete next.startDate;
+        delete next.endDate;
+      }
+      return next;
+    });
     setPage(0);
   };
 
   const handleReset = () => {
-    const defaults = getDefaultFilters();
-    setTempFilters(defaults);
-    setFilters(defaults);
+    setValidationError(null);
+    setAppliedTimeMode("rolling");
+    setDraftTimeMode("rolling");
+    setDraftFilters({});
+    setAppliedFilters({});
     setPage(0);
   };
 
   const handleRefresh = () => {
+    const key = {
+      timeMode: appliedTimeMode,
+      rollingWindowSeconds:
+        appliedTimeMode === "rolling" ? ONE_DAY_SECONDS : undefined,
+      appType: appliedFilters.appType,
+      providerName: appliedFilters.providerName,
+      model: appliedFilters.model,
+      statusCode: appliedFilters.statusCode,
+      startDate:
+        appliedTimeMode === "fixed" ? appliedFilters.startDate : undefined,
+      endDate: appliedTimeMode === "fixed" ? appliedFilters.endDate : undefined,
+    };
+
     queryClient.invalidateQueries({
-      queryKey: usageKeys.logs(filters, page, pageSize),
+      queryKey: usageKeys.logs(key, page, pageSize),
     });
   };
+
+  // 将 Unix 时间戳转换为本地时间的 datetime-local 格式
+  const timestampToLocalDatetime = (timestamp: number): string => {
+    const date = new Date(timestamp * 1000);
+    const year = date.getFullYear();
+    const month = String(date.getMonth() + 1).padStart(2, "0");
+    const day = String(date.getDate()).padStart(2, "0");
+    const hours = String(date.getHours()).padStart(2, "0");
+    const minutes = String(date.getMinutes()).padStart(2, "0");
+    return `${year}-${month}-${day}T${hours}:${minutes}`;
+  };
+
+  // 将 datetime-local 格式转换为 Unix 时间戳
+  const localDatetimeToTimestamp = (datetime: string): number | undefined => {
+    if (!datetime) return undefined;
+    // 验证格式是否完整 (YYYY-MM-DDTHH:mm)
+    if (datetime.length < 16) return undefined;
+    const timestamp = new Date(datetime).getTime();
+    // 验证是否为有效日期
+    if (isNaN(timestamp)) return undefined;
+    return Math.floor(timestamp / 1000);
+  };
+
+  const language = i18n.resolvedLanguage || i18n.language || "en";
+  const locale = getLocaleFromLanguage(language);
+
+  const rollingRangeForDisplay =
+    draftTimeMode === "rolling" ? getRollingRange() : null;
 
   return (
     <div className="space-y-4">
@@ -68,19 +174,19 @@ export function RequestLogTable() {
       <div className="flex flex-col gap-4 rounded-lg border bg-card/50 p-4 backdrop-blur-sm">
         <div className="flex flex-wrap items-center gap-3">
           <Select
-            value={tempFilters.appType || "all"}
+            value={draftFilters.appType || "all"}
             onValueChange={(v) =>
-              setTempFilters({
-                ...tempFilters,
+              setDraftFilters({
+                ...draftFilters,
                 appType: v === "all" ? undefined : v,
               })
             }
           >
             <SelectTrigger className="w-[130px] bg-background">
-              <SelectValue placeholder={t("usage.endpoint", "端点")} />
+              <SelectValue placeholder={t("usage.appType")} />
             </SelectTrigger>
             <SelectContent>
-              <SelectItem value="all">{t("common.all", "全部端点")}</SelectItem>
+              <SelectItem value="all">{t("usage.allApps")}</SelectItem>
               <SelectItem value="claude">Claude</SelectItem>
               <SelectItem value="codex">Codex</SelectItem>
               <SelectItem value="gemini">Gemini</SelectItem>
@@ -88,19 +194,24 @@ export function RequestLogTable() {
           </Select>
 
           <Select
-            value={tempFilters.statusCode?.toString() || "all"}
+            value={draftFilters.statusCode?.toString() || "all"}
             onValueChange={(v) =>
-              setTempFilters({
-                ...tempFilters,
-                statusCode: v === "all" ? undefined : parseInt(v),
+              setDraftFilters({
+                ...draftFilters,
+                statusCode:
+                  v === "all"
+                    ? undefined
+                    : Number.isFinite(Number.parseInt(v, 10))
+                      ? Number.parseInt(v, 10)
+                      : undefined,
               })
             }
           >
             <SelectTrigger className="w-[130px] bg-background">
-              <SelectValue placeholder={t("usage.status", "状态码")} />
+              <SelectValue placeholder={t("usage.statusCode")} />
             </SelectTrigger>
             <SelectContent>
-              <SelectItem value="all">{t("common.all", "全部状态")}</SelectItem>
+              <SelectItem value="all">{t("common.all")}</SelectItem>
               <SelectItem value="200">200 OK</SelectItem>
               <SelectItem value="400">400 Bad Request</SelectItem>
               <SelectItem value="401">401 Unauthorized</SelectItem>
@@ -113,24 +224,24 @@ export function RequestLogTable() {
             <div className="relative flex-1">
               <Search className="absolute left-2.5 top-2.5 h-4 w-4 text-muted-foreground" />
               <Input
-                placeholder={t("usage.provider", "搜索供应商...")}
+                placeholder={t("usage.searchProviderPlaceholder")}
                 className="pl-9 bg-background"
-                value={tempFilters.providerName || ""}
+                value={draftFilters.providerName || ""}
                 onChange={(e) =>
-                  setTempFilters({
-                    ...tempFilters,
+                  setDraftFilters({
+                    ...draftFilters,
                     providerName: e.target.value || undefined,
                   })
                 }
               />
             </div>
             <Input
-              placeholder={t("usage.model", "搜索模型...")}
+              placeholder={t("usage.searchModelPlaceholder")}
               className="w-[180px] bg-background"
-              value={tempFilters.model || ""}
+              value={draftFilters.model || ""}
               onChange={(e) =>
-                setTempFilters({
-                  ...tempFilters,
+                setDraftFilters({
+                  ...draftFilters,
                   model: e.target.value || undefined,
                 })
               }
@@ -140,45 +251,47 @@ export function RequestLogTable() {
 
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div className="flex items-center gap-2 text-sm text-muted-foreground">
-            <span className="whitespace-nowrap">时间范围:</span>
+            <span className="whitespace-nowrap">{t("usage.timeRange")}:</span>
             <Input
               type="datetime-local"
               className="h-8 w-[200px] bg-background"
               value={
-                tempFilters.startDate
-                  ? new Date(tempFilters.startDate * 1000)
-                      .toISOString()
-                      .slice(0, 16)
+                (rollingRangeForDisplay?.startDate ?? draftFilters.startDate)
+                  ? timestampToLocalDatetime(
+                      (rollingRangeForDisplay?.startDate ??
+                        draftFilters.startDate) as number,
+                    )
                   : ""
               }
-              onChange={(e) =>
-                setTempFilters({
-                  ...tempFilters,
-                  startDate: e.target.value
-                    ? Math.floor(new Date(e.target.value).getTime() / 1000)
-                    : undefined,
-                })
-              }
+              onChange={(e) => {
+                const timestamp = localDatetimeToTimestamp(e.target.value);
+                setDraftTimeMode("fixed");
+                setDraftFilters({
+                  ...draftFilters,
+                  startDate: timestamp,
+                });
+              }}
             />
             <span>-</span>
             <Input
               type="datetime-local"
               className="h-8 w-[200px] bg-background"
               value={
-                tempFilters.endDate
-                  ? new Date(tempFilters.endDate * 1000)
-                      .toISOString()
-                      .slice(0, 16)
+                (rollingRangeForDisplay?.endDate ?? draftFilters.endDate)
+                  ? timestampToLocalDatetime(
+                      (rollingRangeForDisplay?.endDate ??
+                        draftFilters.endDate) as number,
+                    )
                   : ""
               }
-              onChange={(e) =>
-                setTempFilters({
-                  ...tempFilters,
-                  endDate: e.target.value
-                    ? Math.floor(new Date(e.target.value).getTime() / 1000)
-                    : undefined,
-                })
-              }
+              onChange={(e) => {
+                const timestamp = localDatetimeToTimestamp(e.target.value);
+                setDraftTimeMode("fixed");
+                setDraftFilters({
+                  ...draftFilters,
+                  endDate: timestamp,
+                });
+              }}
             />
           </div>
 
@@ -190,7 +303,7 @@ export function RequestLogTable() {
               className="h-8"
             >
               <Search className="mr-2 h-3.5 w-3.5" />
-              {t("common.search", "查询")}
+              {t("common.search")}
             </Button>
             <Button
               size="sm"
@@ -199,7 +312,7 @@ export function RequestLogTable() {
               className="h-8"
             >
               <X className="mr-2 h-3.5 w-3.5" />
-              {t("common.reset", "重置")}
+              {t("common.reset")}
             </Button>
             <Button
               size="sm"
@@ -211,6 +324,10 @@ export function RequestLogTable() {
             </Button>
           </div>
         </div>
+
+        {validationError && (
+          <div className="text-sm text-red-600">{validationError}</div>
+        )}
       </div>
 
       {isLoading ? (
@@ -222,34 +339,37 @@ export function RequestLogTable() {
               <TableHeader>
                 <TableRow>
                   <TableHead className="whitespace-nowrap">
-                    {t("usage.time", "时间")}
+                    {t("usage.time")}
                   </TableHead>
                   <TableHead className="whitespace-nowrap">
-                    {t("usage.provider", "供应商")}
+                    {t("usage.provider")}
                   </TableHead>
-                  <TableHead className="min-w-[280px] whitespace-nowrap">
-                    {t("usage.billingModel", "计费模型")}
-                  </TableHead>
-                  <TableHead className="text-right whitespace-nowrap">
-                    {t("usage.inputTokens", "输入")}
+                  <TableHead className="min-w-[200px] whitespace-nowrap">
+                    {t("usage.billingModel")}
                   </TableHead>
                   <TableHead className="text-right whitespace-nowrap">
-                    {t("usage.outputTokens", "输出")}
+                    {t("usage.inputTokens")}
+                  </TableHead>
+                  <TableHead className="text-right whitespace-nowrap">
+                    {t("usage.outputTokens")}
                   </TableHead>
                   <TableHead className="text-right min-w-[90px] whitespace-nowrap">
-                    {t("usage.cacheReadTokens", "缓存读取")}
+                    {t("usage.cacheReadTokens")}
                   </TableHead>
                   <TableHead className="text-right min-w-[90px] whitespace-nowrap">
-                    {t("usage.cacheCreationTokens", "缓存写入")}
+                    {t("usage.cacheCreationTokens")}
                   </TableHead>
                   <TableHead className="text-right whitespace-nowrap">
-                    {t("usage.totalCost", "成本")}
+                    {t("usage.multiplier")}
+                  </TableHead>
+                  <TableHead className="text-right whitespace-nowrap">
+                    {t("usage.totalCost")}
                   </TableHead>
                   <TableHead className="text-center min-w-[140px] whitespace-nowrap">
-                    {t("usage.timingInfo", "用时/首字")}
+                    {t("usage.timingInfo")}
                   </TableHead>
                   <TableHead className="whitespace-nowrap">
-                    {t("usage.status", "状态")}
+                    {t("usage.status")}
                   </TableHead>
                 </TableRow>
               </TableHeader>
@@ -257,59 +377,87 @@ export function RequestLogTable() {
                 {logs.length === 0 ? (
                   <TableRow>
                     <TableCell
-                      colSpan={10}
+                      colSpan={11}
                       className="text-center text-muted-foreground"
                     >
-                      {t("usage.noData", "暂无数据")}
+                      {t("usage.noData")}
                     </TableCell>
                   </TableRow>
                 ) : (
                   logs.map((log) => (
                     <TableRow key={log.requestId}>
                       <TableCell>
-                        {new Date(log.createdAt * 1000).toLocaleString("zh-CN")}
+                        {new Date(log.createdAt * 1000).toLocaleString(locale)}
                       </TableCell>
                       <TableCell>
-                        {log.providerName ||
-                          t("usage.unknownProvider", "未知供应商")}
+                        {log.providerName || t("usage.unknownProvider")}
                       </TableCell>
-                      <TableCell
-                        className="font-mono text-sm max-w-[280px] truncate"
-                        title={log.model}
-                      >
-                        {log.model}
+                      <TableCell className="font-mono text-xs max-w-[200px]">
+                        <div
+                          className="truncate"
+                          title={
+                            log.requestModel && log.requestModel !== log.model
+                              ? `${t("usage.requestModel")}: ${log.requestModel}\n${t("usage.responseModel")}: ${log.model}`
+                              : log.model
+                          }
+                        >
+                          {log.model}
+                        </div>
+                        {log.requestModel && log.requestModel !== log.model && (
+                          <div
+                            className="truncate text-muted-foreground text-[10px]"
+                            title={log.requestModel}
+                          >
+                            ← {log.requestModel}
+                          </div>
+                        )}
                       </TableCell>
                       <TableCell className="text-right">
-                        {log.inputTokens.toLocaleString()}
+                        {fmtInt(log.inputTokens, locale)}
                       </TableCell>
                       <TableCell className="text-right">
-                        {log.outputTokens.toLocaleString()}
+                        {fmtInt(log.outputTokens, locale)}
                       </TableCell>
                       <TableCell className="text-right">
-                        {log.cacheReadTokens.toLocaleString()}
+                        {fmtInt(log.cacheReadTokens, locale)}
                       </TableCell>
                       <TableCell className="text-right">
-                        {log.cacheCreationTokens.toLocaleString()}
+                        {fmtInt(log.cacheCreationTokens, locale)}
+                      </TableCell>
+                      <TableCell className="text-right font-mono text-xs">
+                        {(parseFiniteNumber(log.costMultiplier) ?? 1) !== 1 ? (
+                          <span className="text-orange-600">
+                            ×{log.costMultiplier}
+                          </span>
+                        ) : (
+                          <span className="text-muted-foreground">×1</span>
+                        )}
                       </TableCell>
                       <TableCell className="text-right">
-                        ${parseFloat(log.totalCostUsd).toFixed(6)}
+                        {fmtUsd(log.totalCostUsd, 6)}
                       </TableCell>
                       <TableCell>
                         <div className="flex items-center justify-center gap-1">
                           {(() => {
-                            const durationSec =
-                              (log.durationMs ?? log.latencyMs) / 1000;
-                            const durationColor =
-                              durationSec <= 5
+                            const durationMs =
+                              typeof log.durationMs === "number"
+                                ? log.durationMs
+                                : log.latencyMs;
+                            const durationSec = durationMs / 1000;
+                            const durationColor = Number.isFinite(durationSec)
+                              ? durationSec <= 5
                                 ? "bg-green-100 text-green-800"
                                 : durationSec <= 120
                                   ? "bg-orange-100 text-orange-800"
-                                  : "bg-red-200 text-red-900";
+                                  : "bg-red-200 text-red-900"
+                              : "bg-gray-100 text-gray-700";
                             return (
                               <span
                                 className={`inline-flex items-center justify-center rounded-full px-2 py-0.5 text-xs ${durationColor}`}
                               >
-                                {Math.round(durationSec)}s
+                                {Number.isFinite(durationSec)
+                                  ? `${Math.round(durationSec)}s`
+                                  : "--"}
                               </span>
                             );
                           })()}
@@ -317,17 +465,20 @@ export function RequestLogTable() {
                             log.firstTokenMs != null &&
                             (() => {
                               const firstSec = log.firstTokenMs / 1000;
-                              const firstColor =
-                                firstSec <= 5
+                              const firstColor = Number.isFinite(firstSec)
+                                ? firstSec <= 5
                                   ? "bg-green-100 text-green-800"
                                   : firstSec <= 120
                                     ? "bg-orange-100 text-orange-800"
-                                    : "bg-red-200 text-red-900";
+                                    : "bg-red-200 text-red-900"
+                                : "bg-gray-100 text-gray-700";
                               return (
                                 <span
                                   className={`inline-flex items-center justify-center rounded-full px-2 py-0.5 text-xs ${firstColor}`}
                                 >
-                                  {firstSec.toFixed(1)}s
+                                  {Number.isFinite(firstSec)
+                                    ? `${firstSec.toFixed(1)}s`
+                                    : "--"}
                                 </span>
                               );
                             })()}
@@ -339,8 +490,8 @@ export function RequestLogTable() {
                             }`}
                           >
                             {log.isStreaming
-                              ? t("usage.stream", "流")
-                              : t("usage.nonStream", "非流")}
+                              ? t("usage.stream")
+                              : t("usage.nonStream")}
                           </span>
                         </div>
                       </TableCell>
@@ -366,7 +517,7 @@ export function RequestLogTable() {
           {total > 0 && (
             <div className="flex items-center justify-between px-2">
               <span className="text-sm text-muted-foreground">
-                {t("usage.totalRecords", "共 {{total}} 条记录", { total })}
+                {t("usage.totalRecords", { total })}
               </span>
               <div className="flex items-center gap-1">
                 <Button

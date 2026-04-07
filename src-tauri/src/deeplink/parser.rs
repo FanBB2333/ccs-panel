@@ -79,9 +79,12 @@ fn parse_provider_deeplink(
         .clone();
 
     // Validate app type
-    if app != "claude" && app != "codex" && app != "gemini" {
+    if !matches!(
+        app.as_str(),
+        "claude" | "codex" | "gemini" | "opencode" | "openclaw"
+    ) {
         return Err(AppError::InvalidInput(format!(
-            "Invalid app type: must be 'claude', 'codex', or 'gemini', got '{app}'"
+            "Invalid app type: must be 'claude', 'codex', 'gemini', 'opencode', or 'openclaw', got '{app}'"
         )));
     }
 
@@ -101,9 +104,13 @@ fn parse_provider_deeplink(
             validate_url(hp, "homepage")?;
         }
     }
+    // Validate each endpoint (supports comma-separated multiple URLs)
     if let Some(ref ep) = endpoint {
-        if !ep.is_empty() {
-            validate_url(ep, "endpoint")?;
+        for (i, url) in ep.split(',').enumerate() {
+            let trimmed = url.trim();
+            if !trimmed.is_empty() {
+                validate_url(trimmed, &format!("endpoint[{i}]"))?;
+            }
         }
     }
 
@@ -121,6 +128,19 @@ fn parse_provider_deeplink(
     let config_format = params.get("configFormat").cloned();
     let config_url = params.get("configUrl").cloned();
     let enabled = params.get("enabled").and_then(|v| v.parse::<bool>().ok());
+
+    // Extract usage script fields (v3.9+)
+    let usage_enabled = params
+        .get("usageEnabled")
+        .and_then(|v| v.parse::<bool>().ok());
+    let usage_script = params.get("usageScript").cloned();
+    let usage_api_key = params.get("usageApiKey").cloned();
+    let usage_base_url = params.get("usageBaseUrl").cloned();
+    let usage_access_token = params.get("usageAccessToken").cloned();
+    let usage_user_id = params.get("usageUserId").cloned();
+    let usage_auto_interval = params
+        .get("usageAutoInterval")
+        .and_then(|v| v.parse::<u64>().ok());
 
     Ok(DeepLinkImportRequest {
         version,
@@ -146,6 +166,13 @@ fn parse_provider_deeplink(
         config,
         config_format,
         config_url,
+        usage_enabled,
+        usage_script,
+        usage_api_key,
+        usage_base_url,
+        usage_access_token,
+        usage_user_id,
+        usage_auto_interval,
     })
 }
 
@@ -161,9 +188,12 @@ fn parse_prompt_deeplink(
         .clone();
 
     // Validate app type
-    if app != "claude" && app != "codex" && app != "gemini" {
+    if !matches!(
+        app.as_str(),
+        "claude" | "codex" | "gemini" | "opencode" | "openclaw"
+    ) {
         return Err(AppError::InvalidInput(format!(
-            "Invalid app type: must be 'claude', 'codex', or 'gemini', got '{app}'"
+            "Invalid app type: must be 'claude', 'codex', 'gemini', 'opencode', or 'openclaw', got '{app}'"
         )));
     }
 
@@ -206,6 +236,13 @@ fn parse_prompt_deeplink(
         config: None,
         config_format: None,
         config_url: None,
+        usage_enabled: None,
+        usage_script: None,
+        usage_api_key: None,
+        usage_base_url: None,
+        usage_access_token: None,
+        usage_user_id: None,
+        usage_auto_interval: None,
     })
 }
 
@@ -223,9 +260,12 @@ fn parse_mcp_deeplink(
     // Validate apps format
     for app in apps.split(',') {
         let trimmed = app.trim();
-        if trimmed != "claude" && trimmed != "codex" && trimmed != "gemini" {
+        if !matches!(
+            trimmed,
+            "claude" | "codex" | "gemini" | "opencode" | "openclaw"
+        ) {
             return Err(AppError::InvalidInput(format!(
-                "Invalid app in 'apps': must be 'claude', 'codex', or 'gemini', got '{trimmed}'"
+                "Invalid app in 'apps': must be 'claude', 'codex', 'gemini', 'opencode', or 'openclaw', got '{trimmed}'"
             )));
         }
     }
@@ -261,6 +301,13 @@ fn parse_mcp_deeplink(
         directory: None,
         branch: None,
         config_url: None,
+        usage_enabled: None,
+        usage_script: None,
+        usage_api_key: None,
+        usage_base_url: None,
+        usage_access_token: None,
+        usage_user_id: None,
+        usage_auto_interval: None,
     })
 }
 
@@ -309,5 +356,12 @@ fn parse_skill_deeplink(
         config: None,
         config_format: None,
         config_url: None,
+        usage_enabled: None,
+        usage_script: None,
+        usage_api_key: None,
+        usage_base_url: None,
+        usage_access_token: None,
+        usage_user_id: None,
+        usage_auto_interval: None,
     })
 }

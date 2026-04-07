@@ -13,6 +13,12 @@ use crate::error::AppError;
 
 use super::validation::{extract_server_spec, validate_server_spec};
 
+fn should_sync_codex_mcp() -> bool {
+    // Codex 未安装/未初始化时：~/.codex 目录不存在。
+    // 按用户偏好：目录缺失时跳过写入/删除，不创建任何文件或目录。
+    crate::codex_config::get_codex_config_dir().exists()
+}
+
 /// 返回已启用的 MCP 服务器（过滤 enabled==true）
 fn collect_enabled_servers(cfg: &McpConfig) -> HashMap<String, Value> {
     let mut out = HashMap::new();
@@ -229,6 +235,7 @@ pub fn import_from_codex(config: &mut MultiAppConfig) -> Result<usize, AppError>
                             claude: false,
                             codex: true,
                             gemini: false,
+                            opencode: false,
                         },
                         description: None,
                         homepage: None,
@@ -273,6 +280,9 @@ pub fn import_from_codex(config: &mut MultiAppConfig) -> Result<usize, AppError>
 /// - 仅更新 `mcp_servers` 表，保留其它键
 /// - 仅写入启用项；无启用项时清理 mcp_servers 表
 pub fn sync_enabled_to_codex(config: &MultiAppConfig) -> Result<(), AppError> {
+    if !should_sync_codex_mcp() {
+        return Ok(());
+    }
     use toml_edit::{Item, Table};
 
     // 1) 收集启用项（Codex 维度）
@@ -339,6 +349,9 @@ pub fn sync_single_server_to_codex(
     id: &str,
     server_spec: &Value,
 ) -> Result<(), AppError> {
+    if !should_sync_codex_mcp() {
+        return Ok(());
+    }
     use toml_edit::Item;
 
     // 读取现有的 config.toml
@@ -347,9 +360,14 @@ pub fn sync_single_server_to_codex(
     let mut doc = if config_path.exists() {
         let content =
             std::fs::read_to_string(&config_path).map_err(|e| AppError::io(&config_path, e))?;
-        content
-            .parse::<toml_edit::DocumentMut>()
-            .map_err(|e| AppError::McpValidation(format!("解析 Codex config.toml 失败: {e}")))?
+        // 尝试解析现有配置，如果失败则创建新文档（容错处理）
+        match content.parse::<toml_edit::DocumentMut>() {
+            Ok(doc) => doc,
+            Err(e) => {
+                log::warn!("解析 Codex config.toml 失败: {e}，将创建新配置");
+                toml_edit::DocumentMut::new()
+            }
+        }
     } else {
         toml_edit::DocumentMut::new()
     };
@@ -376,7 +394,8 @@ pub fn sync_single_server_to_codex(
     doc["mcp_servers"][id] = Item::Table(toml_table);
 
     // 写回文件
-    std::fs::write(&config_path, doc.to_string()).map_err(|e| AppError::io(&config_path, e))?;
+    let new_text = doc.to_string();
+    crate::config::write_text_file(&config_path, &new_text)?;
 
     Ok(())
 }
@@ -384,6 +403,9 @@ pub fn sync_single_server_to_codex(
 /// 从 Codex live 配置中移除单个 MCP 服务器
 /// 从正确的 [mcp_servers] 表中删除，同时清理可能存在于错误位置 [mcp.servers] 的数据
 pub fn remove_server_from_codex(id: &str) -> Result<(), AppError> {
+    if !should_sync_codex_mcp() {
+        return Ok(());
+    }
     let config_path = crate::codex_config::get_codex_config_path();
 
     if !config_path.exists() {
@@ -393,9 +415,14 @@ pub fn remove_server_from_codex(id: &str) -> Result<(), AppError> {
     let content =
         std::fs::read_to_string(&config_path).map_err(|e| AppError::io(&config_path, e))?;
 
-    let mut doc = content
-        .parse::<toml_edit::DocumentMut>()
-        .map_err(|e| AppError::McpValidation(format!("解析 Codex config.toml 失败: {e}")))?;
+    // 尝试解析现有配置，如果失败则直接返回（无法删除不存在的内容）
+    let mut doc = match content.parse::<toml_edit::DocumentMut>() {
+        Ok(doc) => doc,
+        Err(e) => {
+            log::warn!("解析 Codex config.toml 失败: {e}，跳过删除操作");
+            return Ok(());
+        }
+    };
 
     // 从正确的位置删除：[mcp_servers]
     if let Some(mcp_servers) = doc.get_mut("mcp_servers").and_then(|s| s.as_table_mut()) {
@@ -412,7 +439,8 @@ pub fn remove_server_from_codex(id: &str) -> Result<(), AppError> {
     }
 
     // 写回文件
-    std::fs::write(&config_path, doc.to_string()).map_err(|e| AppError::io(&config_path, e))?;
+    let new_text = doc.to_string();
+    crate::config::write_text_file(&config_path, &new_text)?;
 
     Ok(())
 }

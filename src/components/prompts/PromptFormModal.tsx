@@ -30,12 +30,13 @@ const PromptFormModal: React.FC<PromptFormModalProps> = ({
 }) => {
   const { t } = useTranslation();
   const appName = t(`apps.${appId}`);
-  const filenameMap: Record<AppId, string> = {
+  const filenameMap: Record<Exclude<AppId, "openclaw">, string> = {
     claude: "CLAUDE.md",
     codex: "AGENTS.md",
     gemini: "GEMINI.md",
+    opencode: "AGENTS.md",
   };
-  const filename = filenameMap[appId];
+  const filename = filenameMap[appId as Exclude<AppId, "openclaw">];
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
   const [content, setContent] = useState("");
@@ -68,7 +69,7 @@ const PromptFormModal: React.FC<PromptFormModalProps> = ({
   }, [initialData]);
 
   const handleSave = async () => {
-    if (!name.trim() || !content.trim()) {
+    if (!name.trim()) {
       return;
     }
 
@@ -147,7 +148,7 @@ const PromptFormModal: React.FC<PromptFormModalProps> = ({
           <Button
             type="button"
             onClick={handleSave}
-            disabled={!name.trim() || !content.trim() || saving}
+            disabled={!name.trim() || saving}
           >
             {saving ? t("common.saving") : t("common.save")}
           </Button>

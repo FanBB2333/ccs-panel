@@ -4,9 +4,10 @@ import {
   setCodexBaseUrl as setCodexBaseUrlInConfig,
 } from "@/utils/providerConfigUtils";
 import type { ProviderCategory } from "@/types";
+import type { AppId } from "@/lib/api";
 
 interface UseBaseUrlStateProps {
-  appType: "claude" | "codex" | "gemini";
+  appType: AppId;
   category: ProviderCategory | undefined;
   settingsConfig: string;
   codexConfig?: string;
@@ -41,8 +42,9 @@ export function useBaseUrlState({
     try {
       const config = JSON.parse(settingsConfig || "{}");
       const envUrl: unknown = config?.env?.ANTHROPIC_BASE_URL;
-      if (typeof envUrl === "string" && envUrl && envUrl.trim() !== baseUrl) {
-        setBaseUrl(envUrl.trim());
+      const nextUrl = typeof envUrl === "string" ? envUrl.trim() : "";
+      if (nextUrl !== baseUrl) {
+        setBaseUrl(nextUrl);
       }
     } catch {
       // ignore
@@ -58,10 +60,8 @@ export function useBaseUrlState({
     if (!codexConfig) return;
 
     const extracted = extractCodexBaseUrl(codexConfig) || "";
-    if (extracted !== codexBaseUrl) {
-      setCodexBaseUrl(extracted);
-    }
-  }, [appType, category, codexConfig, codexBaseUrl]);
+    setCodexBaseUrl((prev) => (prev === extracted ? prev : extracted));
+  }, [appType, category, codexConfig]);
 
   // 从Claude配置同步到 state（Gemini）
   useEffect(() => {
@@ -114,7 +114,7 @@ export function useBaseUrlState({
       const sanitized = url.trim();
       setCodexBaseUrl(sanitized);
 
-      if (!sanitized || !onCodexConfigChange) {
+      if (!onCodexConfigChange) {
         return;
       }
 

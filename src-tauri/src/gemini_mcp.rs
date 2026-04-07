@@ -1,4 +1,3 @@
-use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -6,14 +5,6 @@ use std::path::{Path, PathBuf};
 use crate::config::atomic_write;
 use crate::error::AppError;
 use crate::gemini_config::get_gemini_settings_path;
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct McpStatus {
-    pub user_config_path: String,
-    pub user_config_exists: bool,
-    pub server_count: usize,
-}
 
 /// 获取 Gemini MCP 配置文件路径（~/.gemini/settings.json）
 fn user_config_path() -> PathBuf {
@@ -42,8 +33,8 @@ fn write_json_value(path: &Path, value: &Value) -> Result<(), AppError> {
 ///
 /// 执行反向格式转换以保持与统一 MCP 结构的兼容性：
 /// - httpUrl → url + type: "http"
-/// - 仅有 url 字段 → 保持不变（SSE 类型）
-/// - 仅有 command 字段 → 保持不变（stdio 类型）
+/// - 仅有 url 字段 → 补齐 type: "sse"（Gemini 以字段名推断传输类型）
+/// - 仅有 command 字段 → 补齐 type: "stdio"
 pub fn read_mcp_servers_map() -> Result<std::collections::HashMap<String, Value>, AppError> {
     let path = user_config_path();
     if !path.exists() {
@@ -65,8 +56,15 @@ pub fn read_mcp_servers_map() -> Result<std::collections::HashMap<String, Value>
                 obj.insert("url".to_string(), http_url);
                 obj.insert("type".to_string(), Value::String("http".to_string()));
             }
-            // 如果有 url 但没有 type，不添加 type（默认为 SSE）
-            // 如果有 command 但没有 type，不添加 type（默认为 stdio）
+
+            // Gemini CLI 不使用 type 字段：这里补齐成统一结构，便于校验与导入
+            if obj.get("type").is_none() {
+                if obj.contains_key("command") {
+                    obj.insert("type".to_string(), Value::String("stdio".to_string()));
+                } else if obj.contains_key("url") {
+                    obj.insert("type".to_string(), Value::String("sse".to_string()));
+                }
+            }
         }
     }
 
@@ -126,6 +124,33 @@ pub fn set_mcp_servers_map(
         obj.remove("tags");
         obj.remove("homepage");
         obj.remove("docs");
+
+        // Timeout 转换：Claude/Codex 使用 startup_timeout_sec/tool_timeout_sec
+        // Gemini CLI 只支持 timeout（单位 ms）
+        // 默认值：startup=10s, tool=60s
+        const DEFAULT_STARTUP_MS: u64 = 10_000;
+        const DEFAULT_TOOL_MS: u64 = 60_000;
+
+        let extract_timeout =
+            |obj: &mut Map<String, Value>, key: &str, multiplier: u64| -> Option<u64> {
+                obj.remove(key).and_then(|val| {
+                    val.as_u64()
+                        .map(|n| n * multiplier)
+                        .or_else(|| val.as_f64().map(|f| (f * multiplier as f64) as u64))
+                })
+            };
+
+        // 分别收集 startup 和 tool timeout，未设置时使用默认值
+        let startup_ms = extract_timeout(&mut obj, "startup_timeout_sec", 1000)
+            .or_else(|| extract_timeout(&mut obj, "startup_timeout_ms", 1))
+            .unwrap_or(DEFAULT_STARTUP_MS);
+        let tool_ms = extract_timeout(&mut obj, "tool_timeout_sec", 1000)
+            .or_else(|| extract_timeout(&mut obj, "tool_timeout_ms", 1))
+            .unwrap_or(DEFAULT_TOOL_MS);
+
+        // 取最大值作为 Gemini timeout
+        let final_timeout = startup_ms.max(tool_ms);
+        obj.insert("timeout".to_string(), Value::Number(final_timeout.into()));
 
         out.insert(id.clone(), Value::Object(obj));
     }

@@ -8,11 +8,41 @@ import { ProviderStatsTable } from "./ProviderStatsTable";
 import { ModelStatsTable } from "./ModelStatsTable";
 import type { TimeRange } from "@/types/usage";
 import { motion } from "framer-motion";
-import { BarChart3, ListFilter, Activity } from "lucide-react";
+import {
+  BarChart3,
+  ListFilter,
+  Activity,
+  RefreshCw,
+  Coins,
+} from "lucide-react";
+import { Button } from "@/components/ui/button";
+import { useQueryClient } from "@tanstack/react-query";
+import { usageKeys } from "@/lib/query/usage";
+import {
+  Accordion,
+  AccordionContent,
+  AccordionItem,
+  AccordionTrigger,
+} from "@/components/ui/accordion";
+import { PricingConfigPanel } from "@/components/usage/PricingConfigPanel";
 
 export function UsageDashboard() {
   const { t } = useTranslation();
+  const queryClient = useQueryClient();
   const [timeRange, setTimeRange] = useState<TimeRange>("1d");
+  const [refreshIntervalMs, setRefreshIntervalMs] = useState(30000);
+
+  const refreshIntervalOptionsMs = [0, 5000, 10000, 30000, 60000] as const;
+  const changeRefreshInterval = () => {
+    const currentIndex = refreshIntervalOptionsMs.indexOf(
+      refreshIntervalMs as (typeof refreshIntervalOptionsMs)[number],
+    );
+    const safeIndex = currentIndex >= 0 ? currentIndex : 3; // default 30s
+    const nextIndex = (safeIndex + 1) % refreshIntervalOptionsMs.length;
+    const next = refreshIntervalOptionsMs[nextIndex];
+    setRefreshIntervalMs(next);
+    queryClient.invalidateQueries({ queryKey: usageKeys.all });
+  };
 
   const days = timeRange === "1d" ? 1 : timeRange === "7d" ? 7 : 30;
 
@@ -25,10 +55,8 @@ export function UsageDashboard() {
     >
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
         <div className="flex flex-col gap-1">
-          <h2 className="text-2xl font-bold">{t("usage.title", "使用统计")}</h2>
-          <p className="text-sm text-muted-foreground">
-            {t("usage.subtitle", "查看 AI 模型的使用情况和成本统计")}
-          </p>
+          <h2 className="text-2xl font-bold">{t("usage.title")}</h2>
+          <p className="text-sm text-muted-foreground">{t("usage.subtitle")}</p>
         </div>
 
         <Tabs
@@ -36,32 +64,45 @@ export function UsageDashboard() {
           onValueChange={(v) => setTimeRange(v as TimeRange)}
           className="w-full sm:w-auto"
         >
-          <TabsList className="flex w-full sm:w-auto bg-card/60 border border-border/50 backdrop-blur-sm shadow-sm h-10 p-1">
-            <TabsTrigger
-              value="1d"
-              className="flex-1 sm:flex-none sm:px-6 data-[state=active]:bg-primary/10 data-[state=active]:text-primary hover:text-primary transition-colors"
+          <div className="flex w-full sm:w-auto items-center gap-1">
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              className="h-10 px-2 text-xs text-muted-foreground"
+              title={t("common.refresh", "刷新")}
+              onClick={changeRefreshInterval}
             >
-              {t("usage.today", "24小时")}
-            </TabsTrigger>
-            <TabsTrigger
-              value="7d"
-              className="flex-1 sm:flex-none sm:px-6 data-[state=active]:bg-primary/10 data-[state=active]:text-primary hover:text-primary transition-colors"
-            >
-              {t("usage.last7days", "7天")}
-            </TabsTrigger>
-            <TabsTrigger
-              value="30d"
-              className="flex-1 sm:flex-none sm:px-6 data-[state=active]:bg-primary/10 data-[state=active]:text-primary hover:text-primary transition-colors"
-            >
-              {t("usage.last30days", "30天")}
-            </TabsTrigger>
-          </TabsList>
+              <RefreshCw className="mr-1 h-3.5 w-3.5" />
+              {refreshIntervalMs > 0 ? `${refreshIntervalMs / 1000}s` : "--"}
+            </Button>
+            <TabsList className="flex w-full sm:w-auto bg-card/60 border border-border/50 backdrop-blur-sm shadow-sm h-10 p-1">
+              <TabsTrigger
+                value="1d"
+                className="flex-1 sm:flex-none sm:px-6 data-[state=active]:bg-primary/10 data-[state=active]:text-primary hover:text-primary transition-colors"
+              >
+                {t("usage.today")}
+              </TabsTrigger>
+              <TabsTrigger
+                value="7d"
+                className="flex-1 sm:flex-none sm:px-6 data-[state=active]:bg-primary/10 data-[state=active]:text-primary hover:text-primary transition-colors"
+              >
+                {t("usage.last7days")}
+              </TabsTrigger>
+              <TabsTrigger
+                value="30d"
+                className="flex-1 sm:flex-none sm:px-6 data-[state=active]:bg-primary/10 data-[state=active]:text-primary hover:text-primary transition-colors"
+              >
+                {t("usage.last30days")}
+              </TabsTrigger>
+            </TabsList>
+          </div>
         </Tabs>
       </div>
 
-      <UsageSummaryCards days={days} />
+      <UsageSummaryCards days={days} refreshIntervalMs={refreshIntervalMs} />
 
-      <UsageTrendChart days={days} />
+      <UsageTrendChart days={days} refreshIntervalMs={refreshIntervalMs} />
 
       <div className="space-y-4">
         <Tabs defaultValue="logs" className="w-full">
@@ -69,15 +110,15 @@ export function UsageDashboard() {
             <TabsList className="bg-muted/50">
               <TabsTrigger value="logs" className="gap-2">
                 <ListFilter className="h-4 w-4" />
-                {t("usage.requestLogs", "请求日志")}
+                {t("usage.requestLogs")}
               </TabsTrigger>
               <TabsTrigger value="providers" className="gap-2">
                 <Activity className="h-4 w-4" />
-                {t("usage.providerStats", "Provider 统计")}
+                {t("usage.providerStats")}
               </TabsTrigger>
               <TabsTrigger value="models" className="gap-2">
                 <BarChart3 className="h-4 w-4" />
-                {t("usage.modelStats", "模型统计")}
+                {t("usage.modelStats")}
               </TabsTrigger>
             </TabsList>
           </div>
@@ -88,19 +129,44 @@ export function UsageDashboard() {
             transition={{ delay: 0.2 }}
           >
             <TabsContent value="logs" className="mt-0">
-              <RequestLogTable />
+              <RequestLogTable refreshIntervalMs={refreshIntervalMs} />
             </TabsContent>
 
             <TabsContent value="providers" className="mt-0">
-              <ProviderStatsTable />
+              <ProviderStatsTable refreshIntervalMs={refreshIntervalMs} />
             </TabsContent>
 
             <TabsContent value="models" className="mt-0">
-              <ModelStatsTable />
+              <ModelStatsTable refreshIntervalMs={refreshIntervalMs} />
             </TabsContent>
           </motion.div>
         </Tabs>
       </div>
+
+      {/* Pricing Configuration */}
+      <Accordion type="multiple" defaultValue={[]} className="w-full space-y-4">
+        <AccordionItem
+          value="pricing"
+          className="rounded-xl glass-card overflow-hidden"
+        >
+          <AccordionTrigger className="px-6 py-4 hover:no-underline hover:bg-muted/50 data-[state=open]:bg-muted/50">
+            <div className="flex items-center gap-3">
+              <Coins className="h-5 w-5 text-yellow-500" />
+              <div className="text-left">
+                <h3 className="text-base font-semibold">
+                  {t("settings.advanced.pricing.title")}
+                </h3>
+                <p className="text-sm text-muted-foreground font-normal">
+                  {t("settings.advanced.pricing.description")}
+                </p>
+              </div>
+            </div>
+          </AccordionTrigger>
+          <AccordionContent className="px-6 pb-6 pt-4 border-t border-border/50">
+            <PricingConfigPanel />
+          </AccordionContent>
+        </AccordionItem>
+      </Accordion>
     </motion.div>
   );
 }

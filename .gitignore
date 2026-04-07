@@ -8,7 +8,7 @@ release/
 *.tsbuildinfo
 .npmrc
 CLAUDE.md
-AGENTS.md
+# AGENTS.md
 GEMINI.md
 /.claude
 /.codex
@@ -18,3 +18,14 @@ GEMINI.md
 /.vscode
 vitest-report.json
 nul
+
+# Flatpak build artifacts
+flatpak/cc-switch.deb
+flatpak-build/
+flatpak-repo/
+.worktrees/
+.spec-workflow/
+copilot-api
+.history
+CODEBUDDY.md
+.github

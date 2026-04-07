@@ -40,7 +40,7 @@ export function EndpointField({
           <button
             type="button"
             onClick={onManageClick}
-            className="flex items-center gap-1 text-xs text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-gray-100 transition-colors"
+            className="flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground transition-colors"
           >
             <Zap className="h-3.5 w-3.5" />
             {manageButtonLabel || defaultManageLabel}
@@ -49,7 +49,7 @@ export function EndpointField({
       </div>
       <Input
         id={id}
-        type="url"
+        type="text"
         value={value}
         onChange={(e) => onChange(e.target.value)}
         placeholder={placeholder}

@@ -1,10 +1,4 @@
-import {
-  useState,
-  useEffect,
-  useMemo,
-  forwardRef,
-  useImperativeHandle,
-} from "react";
+import { useState, useMemo, forwardRef, useImperativeHandle } from "react";
 import { useTranslation } from "react-i18next";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -20,16 +14,19 @@ import { toast } from "sonner";
 import { SkillCard } from "./SkillCard";
 import { RepoManagerPanel } from "./RepoManagerPanel";
 import {
-  skillsApi,
-  type Skill,
-  type SkillRepo,
-  type AppType,
-} from "@/lib/api/skills";
+  useDiscoverableSkills,
+  useInstalledSkills,
+  useInstallSkill,
+  useSkillRepos,
+  useAddSkillRepo,
+  useRemoveSkillRepo,
+} from "@/hooks/useSkills";
+import type { AppId } from "@/lib/api/types";
+import type { DiscoverableSkill, SkillRepo } from "@/lib/api/skills";
 import { formatSkillError } from "@/lib/errors/skillErrorParser";
 
 interface SkillsPageProps {
-  onClose?: () => void;
-  initialApp?: AppType;
+  initialApp?: AppId;
 }
 
 export interface SkillsPageHandle {
@@ -37,184 +34,206 @@ export interface SkillsPageHandle {
   openRepoManager: () => void;
 }
 
+/**
+ * Skills 发现面板
+ * 用于浏览和安装来自仓库的 Skills
+ */
 export const SkillsPage = forwardRef<SkillsPageHandle, SkillsPageProps>(
-  ({ onClose: _onClose, initialApp = "claude" }, ref) => {
+  ({ initialApp = "claude" }, ref) => {
     const { t } = useTranslation();
-    const [skills, setSkills] = useState<Skill[]>([]);
-    const [repos, setRepos] = useState<SkillRepo[]>([]);
-    const [loading, setLoading] = useState(true);
     const [repoManagerOpen, setRepoManagerOpen] = useState(false);
     const [searchQuery, setSearchQuery] = useState("");
+    const [filterRepo, setFilterRepo] = useState<string>("all");
     const [filterStatus, setFilterStatus] = useState<
       "all" | "installed" | "uninstalled"
     >("all");
-    // 使用 initialApp，不允许切换
-    const selectedApp = initialApp;
 
-    const loadSkills = async (afterLoad?: (data: Skill[]) => void) => {
-      try {
-        setLoading(true);
-        const data = await skillsApi.getAll(selectedApp);
-        setSkills(data);
-        if (afterLoad) {
-          afterLoad(data);
+    // currentApp 用于安装时的默认应用
+    const currentApp = initialApp;
+
+    // Queries
+    const {
+      data: discoverableSkills,
+      isLoading: loadingDiscoverable,
+      isFetching: fetchingDiscoverable,
+      refetch: refetchDiscoverable,
+    } = useDiscoverableSkills();
+    const { data: installedSkills } = useInstalledSkills();
+    const { data: repos = [], refetch: refetchRepos } = useSkillRepos();
+
+    // Mutations
+    const installMutation = useInstallSkill();
+    const addRepoMutation = useAddSkillRepo();
+    const removeRepoMutation = useRemoveSkillRepo();
+
+    // 已安装的 skill key 集合（使用 directory + repoOwner + repoName 组合判断）
+    const installedKeys = useMemo(() => {
+      if (!installedSkills) return new Set<string>();
+      return new Set(
+        installedSkills.map((s) => {
+          // 构建唯一 key：directory + repoOwner + repoName
+          const owner = s.repoOwner?.toLowerCase() || "";
+          const name = s.repoName?.toLowerCase() || "";
+          return `${s.directory.toLowerCase()}:${owner}:${name}`;
+        }),
+      );
+    }, [installedSkills]);
+
+    type DiscoverableSkillItem = DiscoverableSkill & { installed: boolean };
+
+    // 从可发现技能中提取所有仓库选项
+    const repoOptions = useMemo(() => {
+      if (!discoverableSkills) return [];
+      const repoSet = new Set<string>();
+      discoverableSkills.forEach((s) => {
+        if (s.repoOwner && s.repoName) {
+          repoSet.add(`${s.repoOwner}/${s.repoName}`);
         }
-      } catch (error) {
-        const errorMessage =
-          error instanceof Error ? error.message : String(error);
+      });
+      return Array.from(repoSet).sort();
+    }, [discoverableSkills]);
 
-        // 传入 "skills.loadFailed" 作为标题
-        const { title, description } = formatSkillError(
-          errorMessage,
-          t,
-          "skills.loadFailed",
-        );
+    // 为发现列表补齐 installed 状态，供 SkillCard 使用
+    const skills: DiscoverableSkillItem[] = useMemo(() => {
+      if (!discoverableSkills) return [];
+      return discoverableSkills.map((d) => {
+        // 同时处理 / 和 \ 路径分隔符（兼容 Windows 和 Unix）
+        const installName =
+          d.directory.split(/[/\\]/).pop()?.toLowerCase() ||
+          d.directory.toLowerCase();
+        // 使用 directory + repoOwner + repoName 组合判断是否已安装
+        const key = `${installName}:${d.repoOwner.toLowerCase()}:${d.repoName.toLowerCase()}`;
+        return {
+          ...d,
+          installed: installedKeys.has(key),
+        };
+      });
+    }, [discoverableSkills, installedKeys]);
 
-        toast.error(title, {
-          description,
-          duration: 8000,
-        });
-
-        console.error("Load skills failed:", error);
-      } finally {
-        setLoading(false);
-      }
-    };
-
-    const loadRepos = async () => {
-      try {
-        const data = await skillsApi.getRepos();
-        setRepos(data);
-      } catch (error) {
-        console.error("Failed to load repos:", error);
-      }
-    };
-
-    useEffect(() => {
-      Promise.all([loadSkills(), loadRepos()]);
-      // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, []);
+    const loading = loadingDiscoverable || fetchingDiscoverable;
 
     useImperativeHandle(ref, () => ({
-      refresh: () => loadSkills(),
+      refresh: () => {
+        refetchDiscoverable();
+        refetchRepos();
+      },
       openRepoManager: () => setRepoManagerOpen(true),
     }));
 
     const handleInstall = async (directory: string) => {
+      // 找到对应的 DiscoverableSkill
+      const skill = discoverableSkills?.find(
+        (s) =>
+          s.directory === directory ||
+          s.directory.split("/").pop() === directory,
+      );
+      if (!skill) {
+        toast.error(t("skills.notFound"));
+        return;
+      }
+
       try {
-        await skillsApi.install(directory, selectedApp);
-        toast.success(t("skills.installSuccess", { name: directory }));
-        await loadSkills();
+        await installMutation.mutateAsync({
+          skill,
+          currentApp,
+        });
+        toast.success(t("skills.installSuccess", { name: skill.name }), {
+          closeButton: true,
+        });
       } catch (error) {
         const errorMessage =
           error instanceof Error ? error.message : String(error);
-
-        // 使用错误解析器格式化错误，传入 "skills.installFailed"
         const { title, description } = formatSkillError(
           errorMessage,
           t,
           "skills.installFailed",
         );
-
-        toast.error(title, {
-          description,
-          duration: 10000, // 延长显示时间让用户看清
-        });
-
-        console.error("Install skill failed:", {
-          directory,
-          error,
-          message: errorMessage,
-        });
-      }
-    };
-
-    const handleUninstall = async (directory: string) => {
-      try {
-        await skillsApi.uninstall(directory, selectedApp);
-        toast.success(t("skills.uninstallSuccess", { name: directory }));
-        await loadSkills();
-      } catch (error) {
-        const errorMessage =
-          error instanceof Error ? error.message : String(error);
-
-        // 使用错误解析器格式化错误，传入 "skills.uninstallFailed"
-        const { title, description } = formatSkillError(
-          errorMessage,
-          t,
-          "skills.uninstallFailed",
-        );
-
         toast.error(title, {
           description,
           duration: 10000,
         });
+        console.error("Install skill failed:", error);
+      }
+    };
 
-        console.error("Uninstall skill failed:", {
-          directory,
-          error,
-          message: errorMessage,
+    const handleUninstall = async (_directory: string) => {
+      // 在发现面板中，不支持卸载，需要在主面板中操作
+      toast.info(t("skills.uninstallInMainPanel"));
+    };
+
+    const handleAddRepo = async (repo: SkillRepo) => {
+      try {
+        await addRepoMutation.mutateAsync(repo);
+        // Await discovery so we can report the real count
+        const { data: freshSkills } = await refetchDiscoverable();
+        const count =
+          freshSkills?.filter(
+            (s) =>
+              s.repoOwner === repo.owner &&
+              s.repoName === repo.name &&
+              (s.repoBranch || "main") === (repo.branch || "main"),
+          ).length ?? 0;
+        toast.success(
+          t("skills.repo.addSuccess", {
+            owner: repo.owner,
+            name: repo.name,
+            count,
+          }),
+          { closeButton: true },
+        );
+      } catch (error) {
+        toast.error(t("common.error"), {
+          description: String(error),
         });
       }
     };
 
-    const handleAddRepo = async (repo: SkillRepo) => {
-      await skillsApi.addRepo(repo);
-
-      let repoSkillCount = 0;
-      await Promise.all([
-        loadRepos(),
-        loadSkills((data) => {
-          repoSkillCount = data.filter(
-            (skill) =>
-              skill.repoOwner === repo.owner &&
-              skill.repoName === repo.name &&
-              (skill.repoBranch || "main") === (repo.branch || "main"),
-          ).length;
-        }),
-      ]);
-
-      toast.success(
-        t("skills.repo.addSuccess", {
-          owner: repo.owner,
-          name: repo.name,
-          count: repoSkillCount,
-        }),
-      );
-    };
-
     const handleRemoveRepo = async (owner: string, name: string) => {
-      await skillsApi.removeRepo(owner, name);
-      toast.success(t("skills.repo.removeSuccess", { owner, name }));
-      await Promise.all([loadRepos(), loadSkills()]);
+      try {
+        await removeRepoMutation.mutateAsync({ owner, name });
+        toast.success(t("skills.repo.removeSuccess", { owner, name }), {
+          closeButton: true,
+        });
+      } catch (error) {
+        toast.error(t("common.error"), {
+          description: String(error),
+        });
+      }
     };
 
     // 过滤技能列表
     const filteredSkills = useMemo(() => {
-      const byStatus = skills.filter((skill) => {
+      // 按仓库筛选
+      const byRepo = skills.filter((skill) => {
+        if (filterRepo === "all") return true;
+        const skillRepo = `${skill.repoOwner}/${skill.repoName}`;
+        return skillRepo === filterRepo;
+      });
+
+      // 按安装状态筛选
+      const byStatus = byRepo.filter((skill) => {
         if (filterStatus === "installed") return skill.installed;
         if (filterStatus === "uninstalled") return !skill.installed;
         return true;
       });
 
+      // 按搜索关键词筛选
       if (!searchQuery.trim()) return byStatus;
 
       const query = searchQuery.toLowerCase();
       return byStatus.filter((skill) => {
         const name = skill.name?.toLowerCase() || "";
-        const description = skill.description?.toLowerCase() || "";
-        const directory = skill.directory?.toLowerCase() || "";
+        const repo =
+          skill.repoOwner && skill.repoName
+            ? `${skill.repoOwner}/${skill.repoName}`.toLowerCase()
+            : "";
 
-        return (
-          name.includes(query) ||
-          description.includes(query) ||
-          directory.includes(query)
-        );
+        return name.includes(query) || repo.includes(query);
       });
-    }, [skills, searchQuery, filterStatus]);
+    }, [skills, searchQuery, filterRepo, filterStatus]);
 
     return (
-      <div className="mx-auto max-w-[56rem] px-6 flex flex-col h-[calc(100vh-8rem)] overflow-hidden bg-background/50">
+      <div className="px-6 flex flex-col flex-1 min-h-0 overflow-hidden bg-background/50">
         {/* 技能网格（可滚动详情区域） */}
         <div className="flex-1 overflow-y-auto overflow-x-hidden animate-fade-in">
           <div className="py-4">
@@ -224,10 +243,10 @@ export const SkillsPage = forwardRef<SkillsPageHandle, SkillsPageProps>(
               </div>
             ) : skills.length === 0 ? (
               <div className="flex flex-col items-center justify-center h-64 text-center">
-                <p className="text-lg font-medium text-gray-900 dark:text-gray-100">
+                <p className="text-lg font-medium text-foreground">
                   {t("skills.empty")}
                 </p>
-                <p className="mt-2 text-sm text-gray-500 dark:text-gray-400">
+                <p className="mt-2 text-sm text-muted-foreground">
                   {t("skills.emptyDescription")}
                 </p>
                 <Button
@@ -240,7 +259,7 @@ export const SkillsPage = forwardRef<SkillsPageHandle, SkillsPageProps>(
               </div>
             ) : (
               <>
-                {/* 搜索框 */}
+                {/* 搜索框和筛选器 */}
                 <div className="mb-6 flex flex-col gap-3 md:flex-row md:items-center">
                   <div className="relative flex-1 min-w-0">
                     <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
@@ -252,7 +271,39 @@ export const SkillsPage = forwardRef<SkillsPageHandle, SkillsPageProps>(
                       className="pl-9 pr-3"
                     />
                   </div>
-                  <div className="w-full md:w-48">
+                  {/* 仓库筛选 */}
+                  <div className="w-full md:w-56">
+                    <Select value={filterRepo} onValueChange={setFilterRepo}>
+                      <SelectTrigger className="bg-card border shadow-sm text-foreground">
+                        <SelectValue
+                          placeholder={t("skills.filter.repo")}
+                          className="text-left truncate"
+                        />
+                      </SelectTrigger>
+                      <SelectContent className="bg-card text-foreground shadow-lg max-h-64 min-w-[var(--radix-select-trigger-width)]">
+                        <SelectItem
+                          value="all"
+                          className="text-left pr-3 [&[data-state=checked]>span:first-child]:hidden"
+                        >
+                          {t("skills.filter.allRepos")}
+                        </SelectItem>
+                        {repoOptions.map((repo) => (
+                          <SelectItem
+                            key={repo}
+                            value={repo}
+                            className="text-left pr-3 [&[data-state=checked]>span:first-child]:hidden"
+                            title={repo}
+                          >
+                            <span className="truncate block max-w-[200px]">
+                              {repo}
+                            </span>
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </div>
+                  {/* 安装状态筛选 */}
+                  <div className="w-full md:w-36">
                     <Select
                       value={filterStatus}
                       onValueChange={(val) =>
@@ -299,10 +350,10 @@ export const SkillsPage = forwardRef<SkillsPageHandle, SkillsPageProps>(
                 {/* 技能列表或无结果提示 */}
                 {filteredSkills.length === 0 ? (
                   <div className="flex flex-col items-center justify-center h-48 text-center">
-                    <p className="text-lg font-medium text-gray-900 dark:text-gray-100">
+                    <p className="text-lg font-medium text-foreground">
                       {t("skills.noResults")}
                     </p>
-                    <p className="mt-2 text-sm text-gray-500 dark:text-gray-400">
+                    <p className="mt-2 text-sm text-muted-foreground">
                       {t("skills.emptyDescription")}
                     </p>
                   </div>

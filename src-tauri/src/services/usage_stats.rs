@@ -4,7 +4,7 @@
 
 use crate::database::{lock_conn, Database};
 use crate::error::AppError;
-use chrono::{Duration, Utc};
+use chrono::{Local, TimeZone};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -94,6 +94,9 @@ pub struct RequestLogDetail {
     pub provider_name: Option<String>,
     pub app_type: String,
     pub model: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub request_model: Option<String>,
+    pub cost_multiplier: String,
     pub input_tokens: u32,
     pub output_tokens: u32,
     pub cache_read_tokens: u32,
@@ -139,20 +142,60 @@ impl Database {
             (String::new(), Vec::new())
         };
 
+        // Build rollup WHERE clause using date strings (use ? for sequential binding)
+        let (rollup_where, rollup_params) = if start_date.is_some() || end_date.is_some() {
+            let mut conditions: Vec<String> = Vec::new();
+            let mut params = Vec::new();
+
+            if let Some(start) = start_date {
+                conditions.push("date >= date(?, 'unixepoch', 'localtime')".to_string());
+                params.push(start);
+            }
+            if let Some(end) = end_date {
+                conditions.push("date <= date(?, 'unixepoch', 'localtime')".to_string());
+                params.push(end);
+            }
+
+            (format!("WHERE {}", conditions.join(" AND ")), params)
+        } else {
+            (String::new(), Vec::new())
+        };
+
         let sql = format!(
-            "SELECT 
-                COUNT(*) as total_requests,
-                COALESCE(SUM(CAST(total_cost_usd AS REAL)), 0) as total_cost,
-                COALESCE(SUM(input_tokens), 0) as total_input_tokens,
-                COALESCE(SUM(output_tokens), 0) as total_output_tokens,
-                COALESCE(SUM(cache_creation_tokens), 0) as total_cache_creation_tokens,
-                COALESCE(SUM(cache_read_tokens), 0) as total_cache_read_tokens,
-                COALESCE(SUM(CASE WHEN status_code >= 200 AND status_code < 300 THEN 1 ELSE 0 END), 0) as success_count
-             FROM proxy_request_logs
-             {where_clause}"
+            "SELECT
+                COALESCE(d.total_requests, 0) + COALESCE(r.total_requests, 0),
+                COALESCE(d.total_cost, 0) + COALESCE(r.total_cost, 0),
+                COALESCE(d.total_input_tokens, 0) + COALESCE(r.total_input_tokens, 0),
+                COALESCE(d.total_output_tokens, 0) + COALESCE(r.total_output_tokens, 0),
+                COALESCE(d.total_cache_creation_tokens, 0) + COALESCE(r.total_cache_creation_tokens, 0),
+                COALESCE(d.total_cache_read_tokens, 0) + COALESCE(r.total_cache_read_tokens, 0),
+                COALESCE(d.success_count, 0) + COALESCE(r.success_count, 0)
+            FROM
+                (SELECT
+                    COUNT(*) as total_requests,
+                    COALESCE(SUM(CAST(total_cost_usd AS REAL)), 0) as total_cost,
+                    COALESCE(SUM(input_tokens), 0) as total_input_tokens,
+                    COALESCE(SUM(output_tokens), 0) as total_output_tokens,
+                    COALESCE(SUM(cache_creation_tokens), 0) as total_cache_creation_tokens,
+                    COALESCE(SUM(cache_read_tokens), 0) as total_cache_read_tokens,
+                    COALESCE(SUM(CASE WHEN status_code >= 200 AND status_code < 300 THEN 1 ELSE 0 END), 0) as success_count
+                 FROM proxy_request_logs {where_clause}) d,
+                (SELECT
+                    COALESCE(SUM(request_count), 0) as total_requests,
+                    COALESCE(SUM(CAST(total_cost_usd AS REAL)), 0) as total_cost,
+                    COALESCE(SUM(input_tokens), 0) as total_input_tokens,
+                    COALESCE(SUM(output_tokens), 0) as total_output_tokens,
+                    COALESCE(SUM(cache_creation_tokens), 0) as total_cache_creation_tokens,
+                    COALESCE(SUM(cache_read_tokens), 0) as total_cache_read_tokens,
+                    COALESCE(SUM(success_count), 0) as success_count
+                 FROM usage_daily_rollups {rollup_where}) r"
         );
 
-        let result = conn.query_row(&sql, rusqlite::params_from_iter(params_vec), |row| {
+        // Combine params: detail params first, then rollup params
+        let mut all_params: Vec<i64> = params_vec;
+        all_params.extend(rollup_params);
+
+        let result = conn.query_row(&sql, rusqlite::params_from_iter(all_params), |row| {
             let total_requests: i64 = row.get(0)?;
             let total_cost: f64 = row.get(1)?;
             let total_input_tokens: i64 = row.get(2)?;
@@ -181,152 +224,223 @@ impl Database {
         Ok(result)
     }
 
-    /// 获取每日趋势
-    pub fn get_daily_trends(&self, days: u32) -> Result<Vec<DailyStats>, AppError> {
+    /// 获取每日趋势（滑动窗口，<=24h 按小时，>24h 按天，窗口与汇总一致）
+    pub fn get_daily_trends(
+        &self,
+        start_date: Option<i64>,
+        end_date: Option<i64>,
+    ) -> Result<Vec<DailyStats>, AppError> {
         let conn = lock_conn!(self.conn);
 
-        if days <= 1 {
-            let sql = "SELECT 
-                    strftime('%Y-%m-%dT%H:00:00Z', datetime(created_at, 'unixepoch')) as bucket,
-                    COUNT(*) as request_count,
-                    COALESCE(SUM(CAST(total_cost_usd AS REAL)), 0) as total_cost,
-                    COALESCE(SUM(input_tokens + output_tokens), 0) as total_tokens,
-                    COALESCE(SUM(input_tokens), 0) as total_input_tokens,
-                    COALESCE(SUM(output_tokens), 0) as total_output_tokens,
-                    COALESCE(SUM(cache_creation_tokens), 0) as total_cache_creation_tokens,
-                    COALESCE(SUM(cache_read_tokens), 0) as total_cache_read_tokens
-                 FROM proxy_request_logs
-                 WHERE created_at >= strftime('%s', 'now', '-1 day')
-                 GROUP BY bucket
-                 ORDER BY bucket ASC";
+        let end_ts = end_date.unwrap_or_else(|| Local::now().timestamp());
+        let mut start_ts = start_date.unwrap_or_else(|| end_ts - 24 * 60 * 60);
 
-            let mut stmt = conn.prepare(sql)?;
-            let rows = stmt.query_map([], |row| {
-                Ok(DailyStats {
-                    date: row.get(0)?,
-                    request_count: row.get::<_, i64>(1)? as u64,
-                    total_cost: format!("{:.6}", row.get::<_, f64>(2)?),
-                    total_tokens: row.get::<_, i64>(3)? as u64,
-                    total_input_tokens: row.get::<_, i64>(4)? as u64,
-                    total_output_tokens: row.get::<_, i64>(5)? as u64,
-                    total_cache_creation_tokens: row.get::<_, i64>(6)? as u64,
-                    total_cache_read_tokens: row.get::<_, i64>(7)? as u64,
-                })
-            })?;
-
-            let mut buckets: HashMap<String, DailyStats> = HashMap::new();
-            for row in rows {
-                let stat = row?;
-                buckets.insert(stat.date.clone(), stat);
-            }
-
-            let mut stats = Vec::new();
-            let today = Utc::now().date_naive();
-            for hour in 0..24 {
-                let bucket = today
-                    .and_hms_opt(hour, 0, 0)
-                    .unwrap()
-                    .format("%Y-%m-%dT%H:00:00Z")
-                    .to_string();
-
-                if let Some(stat) = buckets.remove(&bucket) {
-                    stats.push(stat);
-                } else {
-                    stats.push(DailyStats {
-                        date: bucket,
-                        request_count: 0,
-                        total_cost: "0.000000".to_string(),
-                        total_tokens: 0,
-                        total_input_tokens: 0,
-                        total_output_tokens: 0,
-                        total_cache_creation_tokens: 0,
-                        total_cache_read_tokens: 0,
-                    });
-                }
-            }
-            Ok(stats)
-        } else {
-            let sql = "SELECT 
-                    date(created_at, 'unixepoch') as bucket,
-                    COUNT(*) as request_count,
-                    COALESCE(SUM(CAST(total_cost_usd AS REAL)), 0) as total_cost,
-                    COALESCE(SUM(input_tokens + output_tokens), 0) as total_tokens,
-                    COALESCE(SUM(input_tokens), 0) as total_input_tokens,
-                    COALESCE(SUM(output_tokens), 0) as total_output_tokens,
-                    COALESCE(SUM(cache_creation_tokens), 0) as total_cache_creation_tokens,
-                    COALESCE(SUM(cache_read_tokens), 0) as total_cache_read_tokens
-                 FROM proxy_request_logs
-                 WHERE created_at >= strftime('%s', 'now', ?)
-                 GROUP BY bucket
-                 ORDER BY bucket ASC";
-
-            let mut stmt = conn.prepare(sql)?;
-            let rows = stmt.query_map([format!("-{days} days")], |row| {
-                Ok(DailyStats {
-                    date: row.get(0)?,
-                    request_count: row.get::<_, i64>(1)? as u64,
-                    total_cost: format!("{:.6}", row.get::<_, f64>(2)?),
-                    total_tokens: row.get::<_, i64>(3)? as u64,
-                    total_input_tokens: row.get::<_, i64>(4)? as u64,
-                    total_output_tokens: row.get::<_, i64>(5)? as u64,
-                    total_cache_creation_tokens: row.get::<_, i64>(6)? as u64,
-                    total_cache_read_tokens: row.get::<_, i64>(7)? as u64,
-                })
-            })?;
-
-            let mut map = HashMap::new();
-            for row in rows {
-                let stat = row?;
-                map.insert(stat.date.clone(), stat);
-            }
-
-            let mut stats = Vec::new();
-            let start_day =
-                Utc::now().date_naive() - Duration::days((days.saturating_sub(1)) as i64);
-
-            for i in 0..days {
-                let day = start_day + Duration::days(i as i64);
-                let key = day.format("%Y-%m-%d").to_string();
-                if let Some(stat) = map.remove(&key) {
-                    stats.push(stat);
-                } else {
-                    stats.push(DailyStats {
-                        date: key,
-                        request_count: 0,
-                        total_cost: "0.000000".to_string(),
-                        total_tokens: 0,
-                        total_input_tokens: 0,
-                        total_output_tokens: 0,
-                        total_cache_creation_tokens: 0,
-                        total_cache_read_tokens: 0,
-                    });
-                }
-            }
-            Ok(stats)
+        if start_ts >= end_ts {
+            start_ts = end_ts - 24 * 60 * 60;
         }
+
+        let duration = end_ts - start_ts;
+        let bucket_seconds: i64 = if duration <= 24 * 60 * 60 {
+            60 * 60
+        } else {
+            24 * 60 * 60
+        };
+        let mut bucket_count: i64 = if duration <= 0 {
+            1
+        } else {
+            ((duration as f64) / bucket_seconds as f64).ceil() as i64
+        };
+
+        // 固定 24 小时窗口为 24 个小时桶，避免浮点误差
+        if bucket_seconds == 60 * 60 {
+            bucket_count = 24;
+        }
+
+        if bucket_count < 1 {
+            bucket_count = 1;
+        }
+
+        // Query detail logs
+        let sql = "
+            SELECT
+                CAST((created_at - ?1) / ?3 AS INTEGER) as bucket_idx,
+                COUNT(*) as request_count,
+                COALESCE(SUM(CAST(total_cost_usd AS REAL)), 0) as total_cost,
+                COALESCE(SUM(input_tokens + output_tokens), 0) as total_tokens,
+                COALESCE(SUM(input_tokens), 0) as total_input_tokens,
+                COALESCE(SUM(output_tokens), 0) as total_output_tokens,
+                COALESCE(SUM(cache_creation_tokens), 0) as total_cache_creation_tokens,
+                COALESCE(SUM(cache_read_tokens), 0) as total_cache_read_tokens
+            FROM proxy_request_logs
+            WHERE created_at >= ?1 AND created_at <= ?2
+            GROUP BY bucket_idx
+            ORDER BY bucket_idx ASC";
+
+        let mut stmt = conn.prepare(sql)?;
+        let rows = stmt.query_map(params![start_ts, end_ts, bucket_seconds], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                DailyStats {
+                    date: String::new(),
+                    request_count: row.get::<_, i64>(1)? as u64,
+                    total_cost: format!("{:.6}", row.get::<_, f64>(2)?),
+                    total_tokens: row.get::<_, i64>(3)? as u64,
+                    total_input_tokens: row.get::<_, i64>(4)? as u64,
+                    total_output_tokens: row.get::<_, i64>(5)? as u64,
+                    total_cache_creation_tokens: row.get::<_, i64>(6)? as u64,
+                    total_cache_read_tokens: row.get::<_, i64>(7)? as u64,
+                },
+            ))
+        })?;
+
+        let mut map: HashMap<i64, DailyStats> = HashMap::new();
+        for row in rows {
+            let (mut bucket_idx, stat) = row?;
+            if bucket_idx < 0 {
+                continue;
+            }
+            if bucket_idx >= bucket_count {
+                bucket_idx = bucket_count - 1;
+            }
+            map.insert(bucket_idx, stat);
+        }
+
+        // Also query rollup data (daily granularity, only useful for daily buckets)
+        if bucket_seconds >= 86400 {
+            let rollup_sql = "
+                SELECT
+                    CAST((CAST(strftime('%s', date) AS INTEGER) - ?1) / ?3 AS INTEGER) as bucket_idx,
+                    COALESCE(SUM(request_count), 0),
+                    COALESCE(SUM(CAST(total_cost_usd AS REAL)), 0),
+                    COALESCE(SUM(input_tokens + output_tokens), 0),
+                    COALESCE(SUM(input_tokens), 0),
+                    COALESCE(SUM(output_tokens), 0),
+                    COALESCE(SUM(cache_creation_tokens), 0),
+                    COALESCE(SUM(cache_read_tokens), 0)
+                FROM usage_daily_rollups
+                WHERE date >= date(?1, 'unixepoch', 'localtime') AND date <= date(?2, 'unixepoch', 'localtime')
+                GROUP BY bucket_idx
+                ORDER BY bucket_idx ASC";
+
+            let mut rstmt = conn.prepare(rollup_sql)?;
+            let rrows = rstmt.query_map(params![start_ts, end_ts, bucket_seconds], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    (
+                        row.get::<_, i64>(1)? as u64,
+                        row.get::<_, f64>(2)?,
+                        row.get::<_, i64>(3)? as u64,
+                        row.get::<_, i64>(4)? as u64,
+                        row.get::<_, i64>(5)? as u64,
+                        row.get::<_, i64>(6)? as u64,
+                        row.get::<_, i64>(7)? as u64,
+                    ),
+                ))
+            })?;
+
+            for row in rrows {
+                let (mut bucket_idx, (req, cost, tok, inp, out, cc, cr)) = row?;
+                if bucket_idx < 0 {
+                    continue;
+                }
+                if bucket_idx >= bucket_count {
+                    bucket_idx = bucket_count - 1;
+                }
+                let entry = map.entry(bucket_idx).or_insert_with(|| DailyStats {
+                    date: String::new(),
+                    request_count: 0,
+                    total_cost: "0.000000".to_string(),
+                    total_tokens: 0,
+                    total_input_tokens: 0,
+                    total_output_tokens: 0,
+                    total_cache_creation_tokens: 0,
+                    total_cache_read_tokens: 0,
+                });
+                entry.request_count += req;
+                let existing_cost: f64 = entry.total_cost.parse().unwrap_or(0.0);
+                entry.total_cost = format!("{:.6}", existing_cost + cost);
+                entry.total_tokens += tok;
+                entry.total_input_tokens += inp;
+                entry.total_output_tokens += out;
+                entry.total_cache_creation_tokens += cc;
+                entry.total_cache_read_tokens += cr;
+            }
+        }
+
+        let mut stats = Vec::with_capacity(bucket_count as usize);
+        for i in 0..bucket_count {
+            let bucket_start_ts = start_ts + i * bucket_seconds;
+            let bucket_start = Local
+                .timestamp_opt(bucket_start_ts, 0)
+                .single()
+                .unwrap_or_else(Local::now);
+
+            let date = bucket_start.to_rfc3339();
+
+            if let Some(mut stat) = map.remove(&i) {
+                stat.date = date;
+                stats.push(stat);
+            } else {
+                stats.push(DailyStats {
+                    date,
+                    request_count: 0,
+                    total_cost: "0.000000".to_string(),
+                    total_tokens: 0,
+                    total_input_tokens: 0,
+                    total_output_tokens: 0,
+                    total_cache_creation_tokens: 0,
+                    total_cache_read_tokens: 0,
+                });
+            }
+        }
+
+        Ok(stats)
     }
 
     /// 获取 Provider 统计
     pub fn get_provider_stats(&self) -> Result<Vec<ProviderStats>, AppError> {
         let conn = lock_conn!(self.conn);
 
-        let sql = "SELECT 
-                l.provider_id,
-                p.name as provider_name,
-                COUNT(*) as request_count,
-                COALESCE(SUM(l.input_tokens + l.output_tokens), 0) as total_tokens,
-                COALESCE(SUM(CAST(l.total_cost_usd AS REAL)), 0) as total_cost,
-                COALESCE(SUM(CASE WHEN l.status_code >= 200 AND l.status_code < 300 THEN 1 ELSE 0 END), 0) as success_count,
-                COALESCE(AVG(l.latency_ms), 0) as avg_latency
-             FROM proxy_request_logs l
-             LEFT JOIN providers p ON l.provider_id = p.id AND l.app_type = p.app_type
-             GROUP BY l.provider_id, l.app_type
-             ORDER BY total_cost DESC";
+        // UNION detail logs + rollup data, then aggregate
+        let sql = "SELECT
+                provider_id, app_type, provider_name,
+                SUM(request_count) as request_count,
+                SUM(total_tokens) as total_tokens,
+                SUM(total_cost) as total_cost,
+                SUM(success_count) as success_count,
+                CASE WHEN SUM(request_count) > 0
+                    THEN SUM(latency_sum) / SUM(request_count)
+                    ELSE 0 END as avg_latency
+            FROM (
+                SELECT l.provider_id, l.app_type,
+                    p.name as provider_name,
+                    COUNT(*) as request_count,
+                    COALESCE(SUM(l.input_tokens + l.output_tokens), 0) as total_tokens,
+                    COALESCE(SUM(CAST(l.total_cost_usd AS REAL)), 0) as total_cost,
+                    COALESCE(SUM(CASE WHEN l.status_code >= 200 AND l.status_code < 300 THEN 1 ELSE 0 END), 0) as success_count,
+                    COALESCE(SUM(l.latency_ms), 0) as latency_sum
+                FROM proxy_request_logs l
+                LEFT JOIN providers p ON l.provider_id = p.id AND l.app_type = p.app_type
+                GROUP BY l.provider_id, l.app_type
+                UNION ALL
+                SELECT r.provider_id, r.app_type,
+                    p2.name as provider_name,
+                    COALESCE(SUM(r.request_count), 0),
+                    COALESCE(SUM(r.input_tokens + r.output_tokens), 0),
+                    COALESCE(SUM(CAST(r.total_cost_usd AS REAL)), 0),
+                    COALESCE(SUM(r.success_count), 0),
+                    COALESCE(SUM(r.avg_latency_ms * r.request_count), 0)
+                FROM usage_daily_rollups r
+                LEFT JOIN providers p2 ON r.provider_id = p2.id AND r.app_type = p2.app_type
+                GROUP BY r.provider_id, r.app_type
+            )
+            GROUP BY provider_id, app_type
+            ORDER BY total_cost DESC";
 
         let mut stmt = conn.prepare(sql)?;
         let rows = stmt.query_map([], |row| {
-            let request_count: i64 = row.get(2)?;
-            let success_count: i64 = row.get(5)?;
+            let request_count: i64 = row.get(3)?;
+            let success_count: i64 = row.get(6)?;
             let success_rate = if request_count > 0 {
                 (success_count as f32 / request_count as f32) * 100.0
             } else {
@@ -336,13 +450,13 @@ impl Database {
             Ok(ProviderStats {
                 provider_id: row.get(0)?,
                 provider_name: row
-                    .get::<_, Option<String>>(1)?
+                    .get::<_, Option<String>>(2)?
                     .unwrap_or_else(|| "Unknown".to_string()),
                 request_count: request_count as u64,
-                total_tokens: row.get::<_, i64>(3)? as u64,
-                total_cost: format!("{:.6}", row.get::<_, f64>(4)?),
+                total_tokens: row.get::<_, i64>(4)? as u64,
+                total_cost: format!("{:.6}", row.get::<_, f64>(5)?),
                 success_rate,
-                avg_latency_ms: row.get::<_, f64>(6)? as u64,
+                avg_latency_ms: row.get::<_, f64>(7)? as u64,
             })
         })?;
 
@@ -358,14 +472,29 @@ impl Database {
     pub fn get_model_stats(&self) -> Result<Vec<ModelStats>, AppError> {
         let conn = lock_conn!(self.conn);
 
-        let sql = "SELECT 
+        // UNION detail logs + rollup data
+        let sql = "SELECT
                 model,
-                COUNT(*) as request_count,
-                COALESCE(SUM(input_tokens + output_tokens), 0) as total_tokens,
-                COALESCE(SUM(CAST(total_cost_usd AS REAL)), 0) as total_cost
-             FROM proxy_request_logs
-             GROUP BY model
-             ORDER BY total_cost DESC";
+                SUM(request_count) as request_count,
+                SUM(total_tokens) as total_tokens,
+                SUM(total_cost) as total_cost
+            FROM (
+                SELECT model,
+                    COUNT(*) as request_count,
+                    COALESCE(SUM(input_tokens + output_tokens), 0) as total_tokens,
+                    COALESCE(SUM(CAST(total_cost_usd AS REAL)), 0) as total_cost
+                FROM proxy_request_logs
+                GROUP BY model
+                UNION ALL
+                SELECT model,
+                    COALESCE(SUM(request_count), 0),
+                    COALESCE(SUM(input_tokens + output_tokens), 0),
+                    COALESCE(SUM(CAST(total_cost_usd AS REAL)), 0)
+                FROM usage_daily_rollups
+                GROUP BY model
+            )
+            GROUP BY model
+            ORDER BY total_cost DESC";
 
         let mut stmt = conn.prepare(sql)?;
         let rows = stmt.query_map([], |row| {
@@ -439,7 +568,7 @@ impl Database {
 
         // 获取总数
         let count_sql = format!(
-            "SELECT COUNT(*) FROM proxy_request_logs l 
+            "SELECT COUNT(*) FROM proxy_request_logs l
              LEFT JOIN providers p ON l.provider_id = p.id AND l.app_type = p.app_type
              {where_clause}"
         );
@@ -455,6 +584,7 @@ impl Database {
 
         let sql = format!(
             "SELECT l.request_id, l.provider_id, p.name as provider_name, l.app_type, l.model,
+                    l.request_model, l.cost_multiplier,
                     l.input_tokens, l.output_tokens, l.cache_read_tokens, l.cache_creation_tokens,
                     l.input_cost_usd, l.output_cost_usd, l.cache_read_cost_usd, l.cache_creation_cost_usd, l.total_cost_usd,
                     l.is_streaming, l.latency_ms, l.first_token_ms, l.duration_ms,
@@ -475,22 +605,26 @@ impl Database {
                 provider_name: row.get(2)?,
                 app_type: row.get(3)?,
                 model: row.get(4)?,
-                input_tokens: row.get::<_, i64>(5)? as u32,
-                output_tokens: row.get::<_, i64>(6)? as u32,
-                cache_read_tokens: row.get::<_, i64>(7)? as u32,
-                cache_creation_tokens: row.get::<_, i64>(8)? as u32,
-                input_cost_usd: row.get(9)?,
-                output_cost_usd: row.get(10)?,
-                cache_read_cost_usd: row.get(11)?,
-                cache_creation_cost_usd: row.get(12)?,
-                total_cost_usd: row.get(13)?,
-                is_streaming: row.get::<_, i64>(14)? != 0,
-                latency_ms: row.get::<_, i64>(15)? as u64,
-                first_token_ms: row.get::<_, Option<i64>>(16)?.map(|v| v as u64),
-                duration_ms: row.get::<_, Option<i64>>(17)?.map(|v| v as u64),
-                status_code: row.get::<_, i64>(18)? as u16,
-                error_message: row.get(19)?,
-                created_at: row.get(20)?,
+                request_model: row.get(5)?,
+                cost_multiplier: row
+                    .get::<_, Option<String>>(6)?
+                    .unwrap_or_else(|| "1".to_string()),
+                input_tokens: row.get::<_, i64>(7)? as u32,
+                output_tokens: row.get::<_, i64>(8)? as u32,
+                cache_read_tokens: row.get::<_, i64>(9)? as u32,
+                cache_creation_tokens: row.get::<_, i64>(10)? as u32,
+                input_cost_usd: row.get(11)?,
+                output_cost_usd: row.get(12)?,
+                cache_read_cost_usd: row.get(13)?,
+                cache_creation_cost_usd: row.get(14)?,
+                total_cost_usd: row.get(15)?,
+                is_streaming: row.get::<_, i64>(16)? != 0,
+                latency_ms: row.get::<_, i64>(17)? as u64,
+                first_token_ms: row.get::<_, Option<i64>>(18)?.map(|v| v as u64),
+                duration_ms: row.get::<_, Option<i64>>(19)?.map(|v| v as u64),
+                status_code: row.get::<_, i64>(20)? as u16,
+                error_message: row.get(21)?,
+                created_at: row.get(22)?,
             })
         })?;
 
@@ -526,6 +660,7 @@ impl Database {
 
         let result = conn.query_row(
             "SELECT l.request_id, l.provider_id, p.name as provider_name, l.app_type, l.model,
+                    l.request_model, l.cost_multiplier,
                     input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens,
                     input_cost_usd, output_cost_usd, cache_read_cost_usd, cache_creation_cost_usd, total_cost_usd,
                     is_streaming, latency_ms, first_token_ms, duration_ms,
@@ -541,22 +676,24 @@ impl Database {
                     provider_name: row.get(2)?,
                     app_type: row.get(3)?,
                     model: row.get(4)?,
-                    input_tokens: row.get::<_, i64>(5)? as u32,
-                    output_tokens: row.get::<_, i64>(6)? as u32,
-                    cache_read_tokens: row.get::<_, i64>(7)? as u32,
-                    cache_creation_tokens: row.get::<_, i64>(8)? as u32,
-                    input_cost_usd: row.get(9)?,
-                    output_cost_usd: row.get(10)?,
-                    cache_read_cost_usd: row.get(11)?,
-                    cache_creation_cost_usd: row.get(12)?,
-                    total_cost_usd: row.get(13)?,
-                    is_streaming: row.get::<_, i64>(14)? != 0,
-                    latency_ms: row.get::<_, i64>(15)? as u64,
-                    first_token_ms: row.get::<_, Option<i64>>(16)?.map(|v| v as u64),
-                    duration_ms: row.get::<_, Option<i64>>(17)?.map(|v| v as u64),
-                    status_code: row.get::<_, i64>(18)? as u16,
-                    error_message: row.get(19)?,
-                    created_at: row.get(20)?,
+                    request_model: row.get(5)?,
+                    cost_multiplier: row.get::<_, Option<String>>(6)?.unwrap_or_else(|| "1".to_string()),
+                    input_tokens: row.get::<_, i64>(7)? as u32,
+                    output_tokens: row.get::<_, i64>(8)? as u32,
+                    cache_read_tokens: row.get::<_, i64>(9)? as u32,
+                    cache_creation_tokens: row.get::<_, i64>(10)? as u32,
+                    input_cost_usd: row.get(11)?,
+                    output_cost_usd: row.get(12)?,
+                    cache_read_cost_usd: row.get(13)?,
+                    cache_creation_cost_usd: row.get(14)?,
+                    total_cost_usd: row.get(15)?,
+                    is_streaming: row.get::<_, i64>(16)? != 0,
+                    latency_ms: row.get::<_, i64>(17)? as u64,
+                    first_token_ms: row.get::<_, Option<i64>>(18)?.map(|v| v as u64),
+                    duration_ms: row.get::<_, Option<i64>>(19)?.map(|v| v as u64),
+                    status_code: row.get::<_, i64>(20)? as u16,
+                    error_message: row.get(21)?,
+                    created_at: row.get(22)?,
                 })
             },
         );
@@ -611,26 +748,40 @@ impl Database {
             })
             .unwrap_or((None, None));
 
-        // 计算今日使用量
+        // 计算今日使用量 (detail logs + rollup)
         let daily_usage: f64 = conn
             .query_row(
-                "SELECT COALESCE(SUM(CAST(total_cost_usd AS REAL)), 0)
-             FROM proxy_request_logs
-             WHERE provider_id = ? AND app_type = ?
-               AND date(created_at, 'unixepoch') = date('now')",
-                params![provider_id, app_type],
+                "SELECT COALESCE(SUM(cost), 0) FROM (
+                    SELECT CAST(total_cost_usd AS REAL) as cost
+                    FROM proxy_request_logs
+                    WHERE provider_id = ? AND app_type = ?
+                      AND date(datetime(created_at, 'unixepoch', 'localtime')) = date('now', 'localtime')
+                    UNION ALL
+                    SELECT CAST(total_cost_usd AS REAL)
+                    FROM usage_daily_rollups
+                    WHERE provider_id = ? AND app_type = ?
+                      AND date = date('now', 'localtime')
+                )",
+                params![provider_id, app_type, provider_id, app_type],
                 |row| row.get(0),
             )
             .unwrap_or(0.0);
 
-        // 计算本月使用量
+        // 计算本月使用量 (detail logs + rollup)
         let monthly_usage: f64 = conn
             .query_row(
-                "SELECT COALESCE(SUM(CAST(total_cost_usd AS REAL)), 0)
-             FROM proxy_request_logs
-             WHERE provider_id = ? AND app_type = ?
-               AND strftime('%Y-%m', created_at, 'unixepoch') = strftime('%Y-%m', 'now')",
-                params![provider_id, app_type],
+                "SELECT COALESCE(SUM(cost), 0) FROM (
+                    SELECT CAST(total_cost_usd AS REAL) as cost
+                    FROM proxy_request_logs
+                    WHERE provider_id = ? AND app_type = ?
+                      AND strftime('%Y-%m', datetime(created_at, 'unixepoch', 'localtime')) = strftime('%Y-%m', 'now', 'localtime')
+                    UNION ALL
+                    SELECT CAST(total_cost_usd AS REAL)
+                    FROM usage_daily_rollups
+                    WHERE provider_id = ? AND app_type = ?
+                      AND strftime('%Y-%m', date) = strftime('%Y-%m', 'now', 'localtime')
+                )",
+                params![provider_id, app_type, provider_id, app_type],
                 |row| row.get(0),
             )
             .unwrap_or(0.0);
@@ -706,21 +857,26 @@ impl Database {
         )?;
 
         let million = rust_decimal::Decimal::from(1_000_000u64);
-        let input_cost = rust_decimal::Decimal::from(log.input_tokens as u64) * pricing.input
-            / million
-            * multiplier;
-        let output_cost = rust_decimal::Decimal::from(log.output_tokens as u64) * pricing.output
-            / million
-            * multiplier;
+
+        // 与 CostCalculator::calculate 保持一致的计算逻辑：
+        // 1. input_cost 需要扣除 cache_read_tokens（避免缓存部分被重复计费）
+        // 2. 各项成本是基础成本（不含倍率）
+        // 3. 倍率只作用于最终总价
+        let billable_input_tokens =
+            (log.input_tokens as u64).saturating_sub(log.cache_read_tokens as u64);
+        let input_cost =
+            rust_decimal::Decimal::from(billable_input_tokens) * pricing.input / million;
+        let output_cost =
+            rust_decimal::Decimal::from(log.output_tokens as u64) * pricing.output / million;
         let cache_read_cost = rust_decimal::Decimal::from(log.cache_read_tokens as u64)
             * pricing.cache_read
-            / million
-            * multiplier;
+            / million;
         let cache_creation_cost = rust_decimal::Decimal::from(log.cache_creation_tokens as u64)
             * pricing.cache_creation
-            / million
-            * multiplier;
-        let total_cost = input_cost + output_cost + cache_read_cost + cache_creation_cost;
+            / million;
+        // 总成本 = 基础成本之和 × 倍率
+        let base_total = input_cost + output_cost + cache_read_cost + cache_creation_cost;
+        let total_cost = base_total * multiplier;
 
         log.input_cost_usd = format!("{input_cost:.6}");
         log.output_cost_usd = format!("{output_cost:.6}");
@@ -813,89 +969,46 @@ impl Database {
     }
 }
 
-/// 标准化模型名称：去除供应商前缀并将点号替换为短横线
-/// 例如：anthropic/claude-haiku-4.5 → claude-haiku-4-5
-fn normalize_model_id(model_id: &str) -> String {
-    // 1. 去除供应商前缀（如 anthropic/、openai/）
-    let stripped = if let Some(pos) = model_id.find('/') {
-        &model_id[pos + 1..]
-    } else {
-        model_id
-    };
-    // 2. 将点号替换为短横线（如 claude-haiku-4.5 → claude-haiku-4-5）
-    stripped.replace('.', "-")
-}
-
 pub(crate) fn find_model_pricing_row(
     conn: &Connection,
     model_id: &str,
 ) -> Result<Option<(String, String, String, String)>, AppError> {
-    // 0. 标准化模型名称（去除前缀 + 点号转短横线）
-    // 例如：anthropic/claude-haiku-4.5 → claude-haiku-4-5
-    let normalized = normalize_model_id(model_id);
+    // 清洗模型名称：去前缀(/)、去后缀(:)、@ 替换为 -
+    // 例如 moonshotai/gpt-5.2-codex@low:v2 → gpt-5.2-codex-low
+    let cleaned = model_id
+        .rsplit_once('/')
+        .map_or(model_id, |(_, r)| r)
+        .split(':')
+        .next()
+        .unwrap_or(model_id)
+        .trim()
+        .replace('@', "-");
 
-    // 1. 精确匹配（先尝试原始名称，再尝试标准化后的名称）
-    for id in [model_id, normalized.as_str()] {
-        let exact = conn
-            .query_row(
-                "SELECT input_cost_per_million, output_cost_per_million,
-                        cache_read_cost_per_million, cache_creation_cost_per_million
-                 FROM model_pricing
-                 WHERE model_id = ?1",
-                [id],
-                |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, String>(1)?,
-                        row.get::<_, String>(2)?,
-                        row.get::<_, String>(3)?,
-                    ))
-                },
-            )
-            .optional()
-            .map_err(|e| AppError::Database(format!("查询模型定价失败: {e}")))?;
+    // 精确匹配清洗后的名称
+    let exact = conn
+        .query_row(
+            "SELECT input_cost_per_million, output_cost_per_million,
+                    cache_read_cost_per_million, cache_creation_cost_per_million
+             FROM model_pricing
+             WHERE model_id = ?1",
+            [&cleaned],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(|e| AppError::Database(format!("查询模型定价失败: {e}")))?;
 
-        if exact.is_some() {
-            if id != model_id {
-                log::info!("模型 {model_id} 标准化后精确匹配到: {id}");
-            }
-            return Ok(exact);
-        }
+    if exact.is_none() {
+        log::warn!("模型 {model_id}（清洗后: {cleaned}）未找到定价信息，成本将记录为 0");
     }
 
-    // 2. 逐步删除后缀匹配（claude-haiku-4-5-20250929 → claude-haiku-4-5 → claude-haiku-4 → claude-haiku）
-    // 使用标准化后的名称进行后缀匹配
-    let mut current = normalized;
-    while let Some(pos) = current.rfind('-') {
-        current = current[..pos].to_string();
-
-        let result = conn
-            .query_row(
-                "SELECT input_cost_per_million, output_cost_per_million,
-                        cache_read_cost_per_million, cache_creation_cost_per_million
-                 FROM model_pricing
-                 WHERE model_id = ?1",
-                [&current],
-                |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, String>(1)?,
-                        row.get::<_, String>(2)?,
-                        row.get::<_, String>(3)?,
-                    ))
-                },
-            )
-            .optional()
-            .map_err(|e| AppError::Database(format!("查询模型定价失败: {e}")))?;
-
-        if result.is_some() {
-            log::info!("模型 {model_id} 通过删除后缀匹配到: {current}");
-            return Ok(result);
-        }
-    }
-
-    log::warn!("模型 {model_id} 未找到定价信息，成本将记录为 0");
-    Ok(None)
+    Ok(exact)
 }
 
 #[cfg(test)]
@@ -975,54 +1088,46 @@ mod tests {
         let db = Database::memory()?;
         let conn = lock_conn!(db.conn);
 
-        // 测试精确匹配
-        let result = find_model_pricing_row(&conn, "claude-sonnet-4-5")?;
-        assert!(result.is_some(), "应该能精确匹配 claude-sonnet-4-5");
+        // 准备额外定价数据，覆盖前缀/后缀清洗场景
+        conn.execute(
+            "INSERT OR REPLACE INTO model_pricing (
+                model_id, display_name, input_cost_per_million, output_cost_per_million,
+                cache_read_cost_per_million, cache_creation_cost_per_million
+            ) VALUES (?, ?, ?, ?, ?, ?)",
+            params![
+                "claude-haiku-4.5",
+                "Claude Haiku 4.5",
+                "1.0",
+                "2.0",
+                "0.0",
+                "0.0"
+            ],
+        )?;
 
-        // 测试带供应商前缀的模型名称（anthropic/claude-haiku-4.5 → claude-haiku-4-5）
-        let result = find_model_pricing_row(&conn, "anthropic/claude-haiku-4.5")?;
-        assert!(
-            result.is_some(),
-            "应该能匹配带前缀的模型 anthropic/claude-haiku-4.5"
-        );
-
-        // 测试带供应商前缀 + 点号的模型名称
-        let result = find_model_pricing_row(&conn, "anthropic/claude-sonnet-4.5")?;
-        assert!(
-            result.is_some(),
-            "应该能匹配带前缀的模型 anthropic/claude-sonnet-4.5"
-        );
-
-        // 测试逐步删除后缀匹配 - 日期后缀
-        let result = find_model_pricing_row(&conn, "claude-sonnet-4-5-20241022")?;
-        assert!(
-            result.is_some(),
-            "应该能通过删除后缀匹配 claude-sonnet-4-5-20241022"
-        );
-
-        // 测试逐步删除后缀匹配 - 多个后缀
-        let result = find_model_pricing_row(&conn, "claude-haiku-4-5-20240229-preview")?;
-        assert!(
-            result.is_some(),
-            "应该能通过删除后缀匹配 claude-haiku-4-5-20240229-preview"
-        );
-
-        // 测试 GPT 模型
-        let result = find_model_pricing_row(&conn, "gpt-5-2024-11-20")?;
-        assert!(result.is_some(), "应该能通过删除后缀匹配 gpt-5-2024-11-20");
-
-        // 测试 Gemini 模型
-        let result = find_model_pricing_row(&conn, "gemini-2.5-flash-exp")?;
-        assert!(
-            result.is_some(),
-            "应该能通过删除后缀匹配 gemini-2.5-flash-exp"
-        );
-
-        // 测试 claude-sonnet-4-5 命名格式
+        // 测试精确匹配（seed_model_pricing 已预置 claude-sonnet-4-5-20250929）
         let result = find_model_pricing_row(&conn, "claude-sonnet-4-5-20250929")?;
         assert!(
             result.is_some(),
-            "应该能通过删除后缀匹配 claude-sonnet-4-5-20250929"
+            "应该能精确匹配 claude-sonnet-4-5-20250929"
+        );
+
+        // 清洗：去除前缀和冒号后缀
+        let result = find_model_pricing_row(&conn, "anthropic/claude-haiku-4.5")?;
+        assert!(
+            result.is_some(),
+            "带前缀的模型 anthropic/claude-haiku-4.5 应能匹配到 claude-haiku-4.5"
+        );
+        let result = find_model_pricing_row(&conn, "moonshotai/kimi-k2-0905:exa")?;
+        assert!(
+            result.is_some(),
+            "带前缀+冒号后缀的模型应清洗后匹配到 kimi-k2-0905"
+        );
+
+        // 清洗：@ 替换为 -（seed_model_pricing 已预置 gpt-5.2-codex-low）
+        let result = find_model_pricing_row(&conn, "gpt-5.2-codex@low")?;
+        assert!(
+            result.is_some(),
+            "带 @ 分隔符的模型 gpt-5.2-codex@low 应能匹配到 gpt-5.2-codex-low"
         );
 
         // 测试不存在的模型

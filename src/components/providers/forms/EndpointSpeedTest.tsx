@@ -9,11 +9,13 @@ import { FullScreenPanel } from "@/components/common/FullScreenPanel";
 import type { CustomEndpoint, EndpointCandidate } from "@/types";
 
 // 端点测速超时配置（秒）
-const ENDPOINT_TIMEOUT_SECS = {
+const ENDPOINT_TIMEOUT_SECS: Record<AppId, number> = {
   codex: 12,
   claude: 8,
-  gemini: 8, // 新增 gemini
-} as const;
+  gemini: 8,
+  opencode: 8,
+  openclaw: 8,
+};
 
 interface TestResult {
   url: string;
@@ -30,6 +32,8 @@ interface EndpointSpeedTestProps {
   initialEndpoints: EndpointCandidate[];
   visible?: boolean;
   onClose: () => void;
+  autoSelect: boolean;
+  onAutoSelectChange: (checked: boolean) => void;
   // 新建模式：当自定义端点列表变化时回传（仅包含 isCustom 的条目）
   // 编辑模式：不使用此回调，端点直接保存到后端
   onCustomEndpointsChange?: (urls: string[]) => void;
@@ -85,6 +89,8 @@ const EndpointSpeedTest: React.FC<EndpointSpeedTestProps> = ({
   initialEndpoints,
   visible = true,
   onClose,
+  autoSelect,
+  onAutoSelectChange,
   onCustomEndpointsChange,
 }) => {
   const { t } = useTranslation();
@@ -93,7 +99,6 @@ const EndpointSpeedTest: React.FC<EndpointSpeedTestProps> = ({
   );
   const [customUrl, setCustomUrl] = useState("");
   const [addError, setAddError] = useState<string | null>(null);
-  const [autoSelect, setAutoSelect] = useState(true);
   const [isTesting, setIsTesting] = useState(false);
   const [lastError, setLastError] = useState<string | null>(null);
   const [isSaving, setIsSaving] = useState(false);
@@ -488,7 +493,9 @@ const EndpointSpeedTest: React.FC<EndpointSpeedTestProps> = ({
               <input
                 type="checkbox"
                 checked={autoSelect}
-                onChange={(event) => setAutoSelect(event.target.checked)}
+                onChange={(event) => {
+                  onAutoSelectChange(event.target.checked);
+                }}
                 className="h-3.5 w-3.5 rounded border-border-default bg-background text-primary focus:ring-2 focus:ring-primary/20"
               />
               {t("endpointTest.autoSelect")}
@@ -519,7 +526,7 @@ const EndpointSpeedTest: React.FC<EndpointSpeedTestProps> = ({
         <div className="space-y-1.5">
           <div className="flex gap-2">
             <Input
-              type="url"
+              type="text"
               value={customUrl}
               placeholder={t("endpointTest.addEndpointPlaceholder")}
               onChange={(event) => setCustomUrl(event.target.value)}
@@ -599,11 +606,6 @@ const EndpointSpeedTest: React.FC<EndpointSpeedTestProps> = ({
                           }`}
                         >
                           {latency}ms
-                        </div>
-                        <div className="text-[10px] text-gray-500 dark:text-gray-400">
-                          {entry.status
-                            ? t("endpointTest.status", { code: entry.status })
-                            : t("endpointTest.notTested")}
                         </div>
                       </div>
                     ) : isTesting ? (

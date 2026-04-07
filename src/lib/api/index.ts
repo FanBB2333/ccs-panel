@@ -1,13 +1,32 @@
 export type { AppId } from "./types";
-export { providersApi } from "./providers";
+export { providersApi, universalProvidersApi } from "./providers";
 export { settingsApi } from "./settings";
+export { backupsApi } from "./settings";
 export { mcpApi } from "./mcp";
 export { promptsApi } from "./prompts";
+export { skillsApi } from "./skills";
 export { usageApi } from "./usage";
 export { vscodeApi } from "./vscode";
 export { sshApi } from "./ssh";
 export { serversApi } from "./servers";
+export { proxyApi } from "./proxy";
+export { openclawApi } from "./openclaw";
+export { sessionsApi } from "./sessions";
+export { workspaceApi } from "./workspace";
 export * as configApi from "./config";
+export * as authApi from "./auth";
+export * as copilotApi from "./copilot";
 export type { ProviderSwitchEvent } from "./providers";
 export type { Prompt } from "./prompts";
 export type { SshConnectRequest, SshStatusResponse, RemoteConfig } from "./ssh";
+export type {
+  CopilotDeviceCodeResponse,
+  CopilotAuthStatus,
+  GitHubAccount,
+} from "./copilot";
+export type {
+  ManagedAuthProvider,
+  ManagedAuthAccount,
+  ManagedAuthStatus,
+  ManagedAuthDeviceCodeResponse,
+} from "./auth";

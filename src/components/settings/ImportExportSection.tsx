@@ -53,7 +53,7 @@ export function ImportExportSection({
         </p>
       </header>
 
-      <div className="space-y-4 rounded-xl glass-card p-6 border border-white/10">
+      <div className="space-y-4 rounded-lg border border-border bg-muted/40 p-6">
         {/* Import and Export Buttons Side by Side */}
         <div className="grid grid-cols-2 gap-4 items-stretch">
           {/* Import Button */}
@@ -93,7 +93,7 @@ export function ImportExportSection({
                 type="button"
                 onClick={onClear}
                 className="absolute -top-2 -right-2 h-6 w-6 rounded-full bg-red-500 hover:bg-red-600 text-white flex items-center justify-center shadow-lg transition-colors z-10"
-                aria-label="Clear selection"
+                aria-label={t("common.clear")}
               >
                 <XCircle className="h-4 w-4" />
               </button>

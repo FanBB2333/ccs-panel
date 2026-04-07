@@ -45,7 +45,26 @@ interface ServerContextValue {
   testServerConnection: (server: ManagedServer) => Promise<boolean>;
 }
 
-const ServerContext = createContext<ServerContextValue | undefined>(undefined);
+const DEFAULT_LOCAL_SERVER = createLocalServer();
+
+const DEFAULT_SERVER_CONTEXT: ServerContextValue = {
+  servers: { [LOCAL_SERVER_ID]: DEFAULT_LOCAL_SERVER },
+  currentServer: DEFAULT_LOCAL_SERVER,
+  currentServerId: LOCAL_SERVER_ID,
+  isOnServerHome: false,
+  isConnecting: false,
+  selectServer: () => {},
+  goBackToServerHome: () => {},
+  addServer: () => {},
+  updateServer: () => {},
+  removeServer: () => {},
+  refreshServers: () => {},
+  connectToServer: async () => true,
+  disconnectFromServer: async () => {},
+  testServerConnection: async () => true,
+};
+
+const ServerContext = createContext<ServerContextValue>(DEFAULT_SERVER_CONTEXT);
 
 function ensureLocalServer(servers: ManagedServersMap): ManagedServersMap {
   const next = { ...servers };
@@ -371,9 +390,5 @@ export function ServerProvider({ children }: { children: React.ReactNode }) {
 }
 
 export function useServer() {
-  const context = useContext(ServerContext);
-  if (!context) {
-    throw new Error("useServer must be used within ServerProvider");
-  }
-  return context;
+  return useContext(ServerContext);
 }

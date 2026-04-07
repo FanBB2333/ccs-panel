@@ -17,6 +17,7 @@ pub(crate) async fn execute_and_format_usage_result(
     timeout: u64,
     access_token: Option<&str>,
     user_id: Option<&str>,
+    template_type: Option<&str>,
 ) -> Result<UsageResult, AppError> {
     match usage_script::execute_usage_script(
         script_code,
@@ -25,6 +26,7 @@ pub(crate) async fn execute_and_format_usage_result(
         timeout,
         access_token,
         user_id,
+        template_type,
     )
     .await
     {
@@ -79,13 +81,41 @@ pub(crate) async fn execute_and_format_usage_result(
     }
 }
 
+/// Extract API key from provider configuration
+fn extract_api_key_from_provider(provider: &crate::provider::Provider) -> Option<String> {
+    if let Some(env) = provider.settings_config.get("env") {
+        // Try multiple possible API key fields
+        env.get("ANTHROPIC_AUTH_TOKEN")
+            .or_else(|| env.get("ANTHROPIC_API_KEY"))
+            .or_else(|| env.get("OPENROUTER_API_KEY"))
+            .or_else(|| env.get("GOOGLE_API_KEY"))
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+    } else {
+        None
+    }
+}
+
+/// Extract base URL from provider configuration
+fn extract_base_url_from_provider(provider: &crate::provider::Provider) -> Option<String> {
+    if let Some(env) = provider.settings_config.get("env") {
+        // Try multiple possible base URL fields
+        env.get("ANTHROPIC_BASE_URL")
+            .or_else(|| env.get("GOOGLE_GEMINI_BASE_URL"))
+            .and_then(|v| v.as_str())
+            .map(|s| s.trim_end_matches('/').to_string())
+    } else {
+        None
+    }
+}
+
 /// Query provider usage (using saved script configuration)
 pub async fn query_usage(
     state: &AppState,
     app_type: AppType,
     provider_id: &str,
 ) -> Result<UsageResult, AppError> {
-    let (script_code, timeout, api_key, base_url, access_token, user_id) = {
+    let (script_code, timeout, api_key, base_url, access_token, user_id, template_type) = {
         let providers = state.db.get_all_providers(app_type.as_str())?;
         let provider = providers.get(provider_id).ok_or_else(|| {
             AppError::localized(
@@ -114,14 +144,29 @@ pub async fn query_usage(
             ));
         }
 
-        // Get credentials directly from UsageScript, no longer extract from provider config
+        // Get credentials: prioritize UsageScript values, fallback to provider config
+        let api_key = usage_script
+            .api_key
+            .clone()
+            .filter(|k| !k.is_empty())
+            .or_else(|| extract_api_key_from_provider(provider))
+            .unwrap_or_default();
+
+        let base_url = usage_script
+            .base_url
+            .clone()
+            .filter(|u| !u.is_empty())
+            .or_else(|| extract_base_url_from_provider(provider))
+            .unwrap_or_default();
+
         (
             usage_script.code.clone(),
             usage_script.timeout.unwrap_or(10),
-            usage_script.api_key.clone().unwrap_or_default(),
-            usage_script.base_url.clone().unwrap_or_default(),
+            api_key,
+            base_url,
             usage_script.access_token.clone(),
             usage_script.user_id.clone(),
+            usage_script.template_type.clone(),
         )
     };
 
@@ -132,6 +177,7 @@ pub async fn query_usage(
         timeout,
         access_token.as_deref(),
         user_id.as_deref(),
+        template_type.as_deref(),
     )
     .await
 }
@@ -148,6 +194,7 @@ pub async fn test_usage_script(
     base_url: Option<&str>,
     access_token: Option<&str>,
     user_id: Option<&str>,
+    template_type: Option<&str>,
 ) -> Result<UsageResult, AppError> {
     // Use provided credential parameters directly for testing
     execute_and_format_usage_result(
@@ -157,6 +204,7 @@ pub async fn test_usage_script(
         timeout,
         access_token,
         user_id,
+        template_type,
     )
     .await
 }

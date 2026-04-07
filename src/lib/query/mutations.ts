@@ -1,23 +1,52 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
+import { openclawKeys } from "@/hooks/useOpenClaw";
+import { providersApi, sessionsApi, settingsApi, sshApi, type AppId } from "@/lib/api";
+import type { DeleteSessionOptions } from "@/lib/api/sessions";
+import type { SwitchResult } from "@/lib/api/providers";
+import type { Provider, SessionMeta, Settings } from "@/types";
 import type { ManagedServer } from "@/types/server";
-import { providersApi, settingsApi, sshApi, type AppId } from "@/lib/api";
-import type { Provider, Settings } from "@/types";
 import { extractErrorMessage } from "@/utils/errorUtils";
 import { generateUUID } from "@/utils/uuid";
 
-export const useAddProviderMutation = (appId: AppId, server?: ManagedServer | null) => {
+export const useAddProviderMutation = (
+  appId: AppId,
+  server?: ManagedServer | null,
+) => {
   const queryClient = useQueryClient();
   const { t } = useTranslation();
 
   return useMutation({
-    mutationFn: async (providerInput: Omit<Provider, "id">) => {
+    mutationFn: async (
+      providerInput: Omit<Provider, "id"> & { providerKey?: string },
+    ) => {
+      let id: string;
+
+      if (appId === "opencode" || appId === "openclaw") {
+        if (
+          providerInput.category === "omo" ||
+          providerInput.category === "omo-slim"
+        ) {
+          const prefix = providerInput.category === "omo" ? "omo" : "omo-slim";
+          id = `${prefix}-${generateUUID()}`;
+        } else {
+          if (!providerInput.providerKey) {
+            throw new Error(`Provider key is required for ${appId}`);
+          }
+          id = providerInput.providerKey;
+        }
+      } else {
+        id = generateUUID();
+      }
+
+      const { providerKey: _providerKey, ...rest } = providerInput;
       const newProvider: Provider = {
-        ...providerInput,
-        id: generateUUID(),
+        ...rest,
+        id,
         createdAt: Date.now(),
       };
+      delete (newProvider as any).providerKey;
 
       if (server && !server.isLocal && server.connectionType === "ssh") {
         await sshApi.addRemoteProvider(server.id, newProvider, appId);
@@ -30,16 +59,36 @@ export const useAddProviderMutation = (appId: AppId, server?: ManagedServer | nu
       const queryKey = ["providers", appId, server?.id || "local"];
       await queryClient.invalidateQueries({ queryKey });
 
-      // 仅本地模式更新托盘菜单（失败不影响主操作）
-      if (!server || server.isLocal) {
-        try {
+      if (appId === "opencode") {
+        await queryClient.invalidateQueries({
+          queryKey: ["omo", "current-provider-id"],
+        });
+        await queryClient.invalidateQueries({
+          queryKey: ["omo", "provider-count"],
+        });
+        await queryClient.invalidateQueries({
+          queryKey: ["omo-slim", "current-provider-id"],
+        });
+        await queryClient.invalidateQueries({
+          queryKey: ["omo-slim", "provider-count"],
+        });
+      }
+
+      if (appId === "openclaw") {
+        await queryClient.invalidateQueries({
+          queryKey: openclawKeys.health,
+        });
+      }
+
+      try {
+        if (!server || server.isLocal) {
           await providersApi.updateTrayMenu();
-        } catch (trayError) {
-          console.error(
-            "Failed to update tray menu after adding provider",
-            trayError,
-          );
         }
+      } catch (trayError) {
+        console.error(
+          "Failed to update tray menu after adding provider",
+          trayError,
+        );
       }
 
       toast.success(
@@ -52,17 +101,21 @@ export const useAddProviderMutation = (appId: AppId, server?: ManagedServer | nu
       );
     },
     onError: (error: Error) => {
+      const detail = extractErrorMessage(error) || t("common.unknown");
       toast.error(
         t("notifications.addFailed", {
           defaultValue: "添加供应商失败: {{error}}",
-          error: error.message,
+          error: detail,
         }),
       );
     },
   });
 };
 
-export const useUpdateProviderMutation = (appId: AppId, server?: ManagedServer | null) => {
+export const useUpdateProviderMutation = (
+  appId: AppId,
+  server?: ManagedServer | null,
+) => {
   const queryClient = useQueryClient();
   const { t } = useTranslation();
 
@@ -76,8 +129,14 @@ export const useUpdateProviderMutation = (appId: AppId, server?: ManagedServer |
       return provider;
     },
     onSuccess: async () => {
-      const queryKey = ["providers", appId, server?.id || "local"];
-      await queryClient.invalidateQueries({ queryKey });
+      await queryClient.invalidateQueries({
+        queryKey: ["providers", appId, server?.id || "local"],
+      });
+      if (appId === "openclaw") {
+        await queryClient.invalidateQueries({
+          queryKey: openclawKeys.health,
+        });
+      }
       toast.success(
         t("notifications.updateSuccess", {
           defaultValue: "供应商更新成功",
@@ -88,17 +147,21 @@ export const useUpdateProviderMutation = (appId: AppId, server?: ManagedServer |
       );
     },
     onError: (error: Error) => {
+      const detail = extractErrorMessage(error) || t("common.unknown");
       toast.error(
         t("notifications.updateFailed", {
           defaultValue: "更新供应商失败: {{error}}",
-          error: error.message,
+          error: detail,
         }),
       );
     },
   });
 };
 
-export const useDeleteProviderMutation = (appId: AppId, server?: ManagedServer | null) => {
+export const useDeleteProviderMutation = (
+  appId: AppId,
+  server?: ManagedServer | null,
+) => {
   const queryClient = useQueryClient();
   const { t } = useTranslation();
 
@@ -111,19 +174,40 @@ export const useDeleteProviderMutation = (appId: AppId, server?: ManagedServer |
       }
     },
     onSuccess: async () => {
-      const queryKey = ["providers", appId, server?.id || "local"];
-      await queryClient.invalidateQueries({ queryKey });
+      await queryClient.invalidateQueries({
+        queryKey: ["providers", appId, server?.id || "local"],
+      });
 
-      // 仅本地模式更新托盘菜单（失败不影响主操作）
-      if (!server || server.isLocal) {
-        try {
+      if (appId === "opencode") {
+        await queryClient.invalidateQueries({
+          queryKey: ["omo", "current-provider-id"],
+        });
+        await queryClient.invalidateQueries({
+          queryKey: ["omo", "provider-count"],
+        });
+        await queryClient.invalidateQueries({
+          queryKey: ["omo-slim", "current-provider-id"],
+        });
+        await queryClient.invalidateQueries({
+          queryKey: ["omo-slim", "provider-count"],
+        });
+      }
+
+      if (appId === "openclaw") {
+        await queryClient.invalidateQueries({
+          queryKey: openclawKeys.health,
+        });
+      }
+
+      try {
+        if (!server || server.isLocal) {
           await providersApi.updateTrayMenu();
-        } catch (trayError) {
-          console.error(
-            "Failed to update tray menu after deleting provider",
-            trayError,
-          );
         }
+      } catch (trayError) {
+        console.error(
+          "Failed to update tray menu after deleting provider",
+          trayError,
+        );
       }
 
       toast.success(
@@ -136,58 +220,73 @@ export const useDeleteProviderMutation = (appId: AppId, server?: ManagedServer |
       );
     },
     onError: (error: Error) => {
+      const detail = extractErrorMessage(error) || t("common.unknown");
       toast.error(
         t("notifications.deleteFailed", {
           defaultValue: "删除供应商失败: {{error}}",
-          error: error.message,
+          error: detail,
         }),
       );
     },
   });
 };
 
-export const useSwitchProviderMutation = (appId: AppId, server?: ManagedServer | null) => {
+export const useSwitchProviderMutation = (
+  appId: AppId,
+  server?: ManagedServer | null,
+) => {
   const queryClient = useQueryClient();
   const { t } = useTranslation();
 
   return useMutation({
-    mutationFn: async (providerId: string) => {
+    mutationFn: async (providerId: string): Promise<SwitchResult | void> => {
       if (server && !server.isLocal && server.connectionType === "ssh") {
-        await sshApi.switchRemoteProvider(server.id, providerId, appId);
-      } else {
-        await providersApi.switch(providerId, appId);
+        return sshApi.switchRemoteProvider(server.id, providerId, appId);
       }
+      return providersApi.switch(providerId, appId);
     },
     onSuccess: async () => {
-      const queryKey = ["providers", appId, server?.id || "local"];
-      await queryClient.invalidateQueries({ queryKey });
+      await queryClient.invalidateQueries({
+        queryKey: ["providers", appId, server?.id || "local"],
+      });
 
-      // 仅本地模式更新托盘菜单（失败不影响主操作）
-      if (!server || server.isLocal) {
-        try {
-          await providersApi.updateTrayMenu();
-        } catch (trayError) {
-          console.error(
-            "Failed to update tray menu after switching provider",
-            trayError,
-          );
-        }
+      if (appId === "opencode") {
+        await queryClient.invalidateQueries({
+          queryKey: ["opencodeLiveProviderIds"],
+        });
+        await queryClient.invalidateQueries({
+          queryKey: ["omo", "current-provider-id"],
+        });
+        await queryClient.invalidateQueries({
+          queryKey: ["omo-slim", "current-provider-id"],
+        });
+      }
+      if (appId === "openclaw") {
+        await queryClient.invalidateQueries({
+          queryKey: openclawKeys.liveProviderIds,
+        });
+        await queryClient.invalidateQueries({
+          queryKey: openclawKeys.defaultModel,
+        });
+        await queryClient.invalidateQueries({
+          queryKey: openclawKeys.health,
+        });
       }
 
-      toast.success(
-        t("notifications.switchSuccess", {
-          defaultValue: "切换供应商成功",
-          appName: t(`apps.${appId}`, { defaultValue: appId }),
-        }),
-        {
-          closeButton: true,
-        },
-      );
+      try {
+        if (!server || server.isLocal) {
+          await providersApi.updateTrayMenu();
+        }
+      } catch (trayError) {
+        console.error(
+          "Failed to update tray menu after switching provider",
+          trayError,
+        );
+      }
     },
     onError: (error: Error) => {
       const detail = extractErrorMessage(error) || t("common.unknown");
 
-      // 标题与详情分离，便于扫描 + 一键复制
       toast.error(
         t("notifications.switchFailedTitle", { defaultValue: "切换失败" }),
         {
@@ -208,27 +307,43 @@ export const useSwitchProviderMutation = (appId: AppId, server?: ManagedServer |
   });
 };
 
-export const useSetProxyTargetMutation = (appId: AppId) => {
+export const useDeleteSessionMutation = () => {
   const queryClient = useQueryClient();
   const { t } = useTranslation();
 
   return useMutation({
-    mutationFn: async (providerId: string) => {
-      return await providersApi.setProxyTarget(providerId, appId);
+    mutationFn: async (input: DeleteSessionOptions) => {
+      await sessionsApi.delete(input);
+      return input;
     },
-    onSuccess: async () => {
-      await queryClient.invalidateQueries({ queryKey: ["providers", appId] });
+    onSuccess: async (input) => {
+      queryClient.setQueryData<SessionMeta[]>(["sessions"], (current) =>
+        (current ?? []).filter(
+          (session) =>
+            !(
+              session.providerId === input.providerId &&
+              session.sessionId === input.sessionId &&
+              session.sourcePath === input.sourcePath
+            ),
+        ),
+      );
+      queryClient.removeQueries({
+        queryKey: ["sessionMessages", input.providerId, input.sourcePath],
+      });
+
+      await queryClient.invalidateQueries({ queryKey: ["sessions"] });
+
       toast.success(
-        t("notifications.proxyTargetSet", {
-          defaultValue: "已设置代理目标",
+        t("sessionManager.sessionDeleted", {
+          defaultValue: "会话已删除",
         }),
       );
     },
     onError: (error: Error) => {
       const detail = extractErrorMessage(error) || t("common.unknown");
       toast.error(
-        t("notifications.setProxyTargetFailed", {
-          defaultValue: "设置代理目标失败: {{error}}",
+        t("sessionManager.deleteFailed", {
+          defaultValue: "删除会话失败: {{error}}",
           error: detail,
         }),
       );

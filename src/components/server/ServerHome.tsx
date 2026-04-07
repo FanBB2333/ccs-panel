@@ -70,7 +70,7 @@ export function ServerHome({
   });
 
   return (
-    <div className="mx-auto max-w-[56rem] px-5 flex flex-col h-[calc(100vh-8rem)] overflow-hidden">
+    <div className="flex h-full min-h-0 w-full flex-col overflow-hidden px-6 md:px-8 lg:px-10">
       {/* 页面标题 */}
       <div className="flex items-center justify-between mb-6">
         <div>
@@ -111,8 +111,8 @@ export function ServerHome({
       />
 
       {/* 服务器卡片网格 */}
-      <div className="flex-1 overflow-y-auto overflow-x-hidden pb-12 px-1">
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4 animate-slide-up">
+      <div className="flex-1 overflow-y-auto overflow-x-hidden pb-12">
+        <div className="grid grid-cols-[repeat(auto-fit,minmax(320px,1fr))] gap-5 animate-slide-up">
           {serverList.map((server) => (
             <ServerCard
               key={server.id}

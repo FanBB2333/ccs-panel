@@ -36,10 +36,22 @@ impl PromptService {
 
         state.db.save_prompt(app.as_str(), &prompt)?;
 
-        // 如果是已启用的提示词，同步更新到对应的文件
         if is_enabled {
+            // 启用提示词：写入内容到文件
             let target_path = prompt_file_path(&app)?;
             write_text_file(&target_path, &prompt.content)?;
+        } else {
+            // 禁用提示词：检查是否还有其他已启用的提示词
+            let prompts = state.db.get_prompts(app.as_str())?;
+            let any_enabled = prompts.values().any(|p| p.enabled);
+
+            if !any_enabled {
+                // 所有提示词都已禁用，清空文件
+                let target_path = prompt_file_path(&app)?;
+                if target_path.exists() {
+                    write_text_file(&target_path, "")?;
+                }
+            }
         }
 
         Ok(())
@@ -85,7 +97,7 @@ impl PromptService {
                         if !content_exists {
                             let timestamp = std::time::SystemTime::now()
                                 .duration_since(std::time::UNIX_EPOCH)
-                                .unwrap()
+                                .unwrap_or_default()
                                 .as_secs() as i64;
                             let backup_id = format!("backup-{timestamp}");
                             let backup_prompt = Prompt {

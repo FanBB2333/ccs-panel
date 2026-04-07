@@ -1,5 +1,16 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Loader2, Save, FolderSearch, Coins, Database, Activity } from "lucide-react";
+import { motion } from "framer-motion";
+import {
+  Loader2,
+  Save,
+  FolderSearch,
+  Database,
+  Cloud,
+  ScrollText,
+  HardDriveDownload,
+  FlaskConical,
+  KeyRound,
+} from "lucide-react";
 import { toast } from "sonner";
 import {
   Dialog,
@@ -20,38 +31,39 @@ import { settingsApi } from "@/lib/api";
 import { LanguageSettings } from "@/components/settings/LanguageSettings";
 import { ThemeSettings } from "@/components/settings/ThemeSettings";
 import { WindowSettings } from "@/components/settings/WindowSettings";
+import { AppVisibilitySettings } from "@/components/settings/AppVisibilitySettings";
+import { SkillSyncMethodSettings } from "@/components/settings/SkillSyncMethodSettings";
+import { TerminalSettings } from "@/components/settings/TerminalSettings";
 import { DirectorySettings } from "@/components/settings/DirectorySettings";
 import { ServerDirectorySettings } from "@/components/settings/ServerDirectorySettings";
 import { ImportExportSection } from "@/components/settings/ImportExportSection";
+import { BackupListSection } from "@/components/settings/BackupListSection";
+import { WebdavSyncSection } from "@/components/settings/WebdavSyncSection";
 import { AboutSection } from "@/components/settings/AboutSection";
-// TODO: Proxy 功能开发中，暂时不需要
-// import { ProxyPanel } from "@/components/proxy";
-import { PricingConfigPanel } from "@/components/usage/PricingConfigPanel";
+import { ProxyTabContent } from "@/components/settings/ProxyTabContent";
 import { ModelTestConfigPanel } from "@/components/usage/ModelTestConfigPanel";
-import { AutoFailoverConfigPanel } from "@/components/proxy/AutoFailoverConfigPanel";
 import { UsageDashboard } from "@/components/usage/UsageDashboard";
+import { LogConfigPanel } from "@/components/settings/LogConfigPanel";
+import { AuthCenterPanel } from "@/components/settings/AuthCenterPanel";
 import { useSettings } from "@/hooks/useSettings";
 import { useImportExport } from "@/hooks/useImportExport";
 import { useTranslation } from "react-i18next";
-import type { SettingsFormState } from "@/hooks/useSettings";
-// TODO: Proxy 功能开发中，暂时不需要
-// import { Switch } from "@/components/ui/switch";
-// import { Badge } from "@/components/ui/badge";
-// import { useProxyStatus } from "@/hooks/useProxyStatus";
-import { Switch } from "@/components/ui/switch";
 import { useServer } from "@/contexts/ServerContext";
+import type { SettingsFormState } from "@/hooks/useSettings";
 import type { RemoteConfigDirs } from "@/types/server";
 
 interface SettingsDialogProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   onImportSuccess?: () => void | Promise<void>;
+  defaultTab?: string;
 }
 
 export function SettingsPage({
   open,
   onOpenChange,
   onImportSuccess,
+  defaultTab = "general",
 }: SettingsDialogProps) {
   const { t } = useTranslation();
   const { currentServer, updateServer } = useServer();
@@ -94,10 +106,10 @@ export function SettingsPage({
 
   useEffect(() => {
     if (open) {
-      setActiveTab("general");
+      setActiveTab(defaultTab);
       resetStatus();
     }
-  }, [open, resetStatus]);
+  }, [open, resetStatus, defaultTab]);
 
   useEffect(() => {
     if (requiresRestart) {
@@ -135,7 +147,7 @@ export function SettingsPage({
   const handleRestartNow = useCallback(async () => {
     setShowRestartPrompt(false);
     if (import.meta.env.DEV) {
-      toast.success(t("settings.devModeRestartHint"));
+      toast.success(t("settings.devModeRestartHint"), { closeButton: true });
       closeAfterSave();
       return;
     }
@@ -170,43 +182,22 @@ export function SettingsPage({
     [autoSaveSettings, settings, t, updateSettings],
   );
 
-  const isBusy = useMemo(() => isLoading && !settings, [isLoading, settings]);
-
-  // TODO: Proxy 功能开发中，暂时禁用
-  // const {
-  //   isRunning,
-  //   startWithTakeover: startProxy,
-  //   stopWithRestore: stopProxy,
-  //   isPending: isProxyPending,
-  // } = useProxyStatus({ serverId: currentServerId });
-  const [failoverEnabled, setFailoverEnabled] = useState(true);
-
-  // 处理远程服务器配置目录变更
   const handleServerConfigDirsChange = useCallback(
     (dirs: RemoteConfigDirs) => {
       if (!currentServer || currentServer.isLocal) return;
+
       updateServer({
         ...currentServer,
         configDirs: dirs,
       });
     },
-    [currentServer, updateServer]
+    [currentServer, updateServer],
   );
 
-  // const handleToggleProxy = async (checked: boolean) => {
-  //   try {
-  //     if (!checked) {
-  //       await stopProxy();
-  //     } else {
-  //       await startProxy();
-  //     }
-  //   } catch (error) {
-  //     console.error("Toggle proxy failed:", error);
-  //   }
-  // };
+  const isBusy = useMemo(() => isLoading && !settings, [isLoading, settings]);
 
   return (
-    <div className="mx-auto max-w-[56rem] flex flex-col h-[calc(100vh-8rem)] overflow-hidden px-6">
+    <div className="flex flex-col h-full overflow-hidden px-6">
       {isBusy ? (
         <div className="flex flex-1 items-center justify-center">
           <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
@@ -217,278 +208,323 @@ export function SettingsPage({
           onValueChange={setActiveTab}
           className="flex flex-col h-full"
         >
-          <TabsList className="grid w-full grid-cols-4 mb-6 glass rounded-lg">
+          <TabsList className="grid w-full grid-cols-6 mb-6 glass rounded-lg">
             <TabsTrigger value="general">
               {t("settings.tabGeneral")}
+            </TabsTrigger>
+            <TabsTrigger value="proxy">{t("settings.tabProxy")}</TabsTrigger>
+            <TabsTrigger value="auth">
+              {t("settings.tabAuth", { defaultValue: "认证" })}
             </TabsTrigger>
             <TabsTrigger value="advanced">
               {t("settings.tabAdvanced")}
             </TabsTrigger>
-            <TabsTrigger value="usage">
-              {t("usage.title", "使用统计")}
-            </TabsTrigger>
+            <TabsTrigger value="usage">{t("usage.title")}</TabsTrigger>
             <TabsTrigger value="about">{t("common.about")}</TabsTrigger>
           </TabsList>
 
-          <div className="flex-1 overflow-y-auto overflow-x-hidden pr-2">
-            <TabsContent value="general" className="space-y-6 mt-0">
-              {settings ? (
-                <>
-                  <LanguageSettings
-                    value={settings.language}
-                    onChange={(lang) => handleAutoSave({ language: lang })}
-                  />
-                  <ThemeSettings />
-                  <WindowSettings
-                    settings={settings}
-                    onChange={handleAutoSave}
-                  />
-                </>
-              ) : null}
-            </TabsContent>
-
-            <TabsContent value="advanced" className="space-y-6 mt-0 pb-6">
-              {settings ? (
-                <div className="space-y-4">
-                  <Accordion
-                    type="multiple"
-                    defaultValue={[]}
-                    className="w-full space-y-4"
+          <div className="flex-1 min-h-0 flex flex-col">
+            <div className="flex-1 overflow-y-auto overflow-x-hidden pr-2">
+              <TabsContent value="general" className="space-y-6 mt-0">
+                {settings ? (
+                  <motion.div
+                    initial={{ opacity: 0, y: 10 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    transition={{ duration: 0.3 }}
+                    className="space-y-6"
                   >
-                    <AccordionItem
-                      value="directory"
-                      className="rounded-xl glass-card overflow-hidden"
-                    >
-                      <AccordionTrigger className="px-6 py-4 hover:no-underline hover:bg-muted/50 data-[state=open]:bg-muted/50">
-                        <div className="flex items-center gap-3">
-                          <FolderSearch className="h-5 w-5 text-primary" />
-                          <div className="text-left">
-                            <h3 className="text-base font-semibold">
-                              配置文件目录
-                            </h3>
-                            <p className="text-sm text-muted-foreground font-normal">
-                              管理 Claude、Codex 和 Gemini 的配置存储路径
-                            </p>
-                          </div>
-                        </div>
-                      </AccordionTrigger>
-                      <AccordionContent className="px-6 pb-6 pt-4 border-t border-border/50">
-                        {isRemoteServer ? (
-                          <ServerDirectorySettings
-                            serverId={currentServer.id}
-                            configDirs={currentServer.configDirs ?? {}}
-                            onConfigDirsChange={handleServerConfigDirsChange}
-                          />
-                        ) : (
-                          <DirectorySettings
-                            appConfigDir={appConfigDir}
-                            resolvedDirs={resolvedDirs}
-                            onAppConfigChange={updateAppConfigDir}
-                            onBrowseAppConfig={browseAppConfigDir}
-                            onResetAppConfig={resetAppConfigDir}
-                            claudeDir={settings.claudeConfigDir}
-                            codexDir={settings.codexConfigDir}
-                            geminiDir={settings.geminiConfigDir}
-                            onDirectoryChange={updateDirectory}
-                            onBrowseDirectory={browseDirectory}
-                            onResetDirectory={resetDirectory}
-                          />
-                        )}
-                      </AccordionContent>
-                    </AccordionItem>
+                    <LanguageSettings
+                      value={settings.language}
+                      onChange={(lang) => handleAutoSave({ language: lang })}
+                    />
+                    <ThemeSettings />
+                    <AppVisibilitySettings
+                      settings={settings}
+                      onChange={handleAutoSave}
+                    />
+                    <WindowSettings
+                      settings={settings}
+                      onChange={handleAutoSave}
+                    />
+                    <SkillSyncMethodSettings
+                      value={settings.skillSyncMethod ?? "auto"}
+                      onChange={(method) =>
+                        handleAutoSave({ skillSyncMethod: method })
+                      }
+                    />
+                    <TerminalSettings
+                      value={settings.preferredTerminal}
+                      onChange={(terminal) =>
+                        handleAutoSave({ preferredTerminal: terminal })
+                      }
+                    />
+                  </motion.div>
+                ) : null}
+              </TabsContent>
 
-                    {/* TODO: Proxy 功能开发中，暂时隐藏入口 */}
-                    {/* {currentServer && !currentServer.isLocal && (
-                    <AccordionItem
-                      value="proxy"
-                      className="rounded-xl glass-card overflow-hidden"
-                    >
-                      <AccordionTrigger className="px-6 py-4 hover:no-underline hover:bg-muted/50 data-[state=open]:bg-muted/50">
-                        <div className="flex flex-1 items-center justify-between pr-4">
-                          <div className="flex items-center gap-3">
-                            <Server className="h-5 w-5 text-green-500" />
-                            <div className="text-left">
-                              <h3 className="text-base font-semibold">
-                                本地代理
-                              </h3>
-                              <p className="text-sm text-muted-foreground font-normal">
-                                控制代理服务开关、查看状态与端口信息
-                              </p>
-                            </div>
-                          </div>
-                          <div
-                            className="flex items-center gap-4"
-                            onClick={(e) => e.stopPropagation()}
-                          >
-                            <Badge
-                              variant={isRunning ? "default" : "secondary"}
-                              className="gap-1.5 h-6"
-                            >
-                              <Activity
-                                className={`h-3 w-3 ${isRunning ? "animate-pulse" : ""}`}
-                              />
-                              {isRunning ? "运行中" : "已停止"}
-                            </Badge>
-                            <Switch
-                              checked={isRunning}
-                              onCheckedChange={handleToggleProxy}
-                              disabled={isProxyPending}
-                            />
-                          </div>
-                        </div>
-                      </AccordionTrigger>
-                      <AccordionContent className="px-6 pb-6 pt-0 border-t border-border/50">
-                        <ProxyPanel />
-                      </AccordionContent>
-                    </AccordionItem>
-                    )} */}
+              <TabsContent value="proxy" className="space-y-6 mt-0 pb-4">
+                {settings ? (
+                  <ProxyTabContent
+                    settings={settings}
+                    onAutoSave={handleAutoSave}
+                  />
+                ) : null}
+              </TabsContent>
 
-                    <AccordionItem
-                      value="test"
-                      className="rounded-xl glass-card overflow-hidden"
-                    >
-                      <AccordionTrigger className="px-6 py-4 hover:no-underline hover:bg-muted/50 data-[state=open]:bg-muted/50">
-                        <div className="flex items-center gap-3">
-                          <Activity className="h-5 w-5 text-indigo-500" />
-                          <div className="text-left">
-                            <h3 className="text-base font-semibold">
-                              模型测试配置
-                            </h3>
-                            <p className="text-sm text-muted-foreground font-normal">
-                              配置模型测试使用的默认模型和提示词
-                            </p>
-                          </div>
-                        </div>
-                      </AccordionTrigger>
-                      <AccordionContent className="px-6 pb-6 pt-4 border-t border-border/50">
-                        <ModelTestConfigPanel />
-                      </AccordionContent>
-                    </AccordionItem>
-
-                    <AccordionItem
-                      value="failover"
-                      className="rounded-xl glass-card overflow-hidden"
-                    >
-                      <AccordionTrigger className="px-6 py-4 hover:no-underline hover:bg-muted/50 data-[state=open]:bg-muted/50">
-                        <div className="flex flex-1 items-center justify-between pr-4">
-                          <div className="flex items-center gap-3">
-                            <Activity className="h-5 w-5 text-orange-500" />
-                            <div className="text-left">
-                              <h3 className="text-base font-semibold">
-                                自动故障转移
-                              </h3>
-                              <p className="text-sm text-muted-foreground font-normal">
-                                配置自动故障转移和熔断策略
-                              </p>
-                            </div>
-                          </div>
-                          <div
-                            className="flex items-center gap-4"
-                            onClick={(e) => e.stopPropagation()}
-                          >
-                            <div className="flex items-center gap-2">
-                              {/* Removed status text as requested */}
-                              <Switch
-                                checked={failoverEnabled}
-                                onCheckedChange={setFailoverEnabled}
-                              />
-                            </div>
-                          </div>
-                        </div>
-                      </AccordionTrigger>
-                      <AccordionContent className="px-6 pb-6 pt-4 border-t border-border/50">
-                        <AutoFailoverConfigPanel
-                          enabled={failoverEnabled}
-                          onEnabledChange={setFailoverEnabled}
-                        />
-                      </AccordionContent>
-                    </AccordionItem>
-
-                    <AccordionItem
-                      value="pricing"
-                      className="rounded-xl glass-card overflow-hidden"
-                    >
-                      <AccordionTrigger className="px-6 py-4 hover:no-underline hover:bg-muted/50 data-[state=open]:bg-muted/50">
-                        <div className="flex items-center gap-3">
-                          <Coins className="h-5 w-5 text-yellow-500" />
-                          <div className="text-left">
-                            <h3 className="text-base font-semibold">
-                              成本定价
-                            </h3>
-                            <p className="text-sm text-muted-foreground font-normal">
-                              管理各模型 Token 计费规则
-                            </p>
-                          </div>
-                        </div>
-                      </AccordionTrigger>
-                      <AccordionContent className="px-6 pb-6 pt-4 border-t border-border/50">
-                        <PricingConfigPanel />
-                      </AccordionContent>
-                    </AccordionItem>
-
-                    <AccordionItem
-                      value="data"
-                      className="rounded-xl glass-card overflow-hidden"
-                    >
-                      <AccordionTrigger className="px-6 py-4 hover:no-underline hover:bg-muted/50 data-[state=open]:bg-muted/50">
-                        <div className="flex items-center gap-3">
-                          <Database className="h-5 w-5 text-blue-500" />
-                          <div className="text-left">
-                            <h3 className="text-base font-semibold">
-                              数据管理
-                            </h3>
-                            <p className="text-sm text-muted-foreground font-normal">
-                              导入导出配置与备份恢复
-                            </p>
-                          </div>
-                        </div>
-                      </AccordionTrigger>
-                      <AccordionContent className="px-6 pb-6 pt-4 border-t border-border/50">
-                        <ImportExportSection
-                          status={importStatus}
-                          selectedFile={selectedFile}
-                          errorMessage={errorMessage}
-                          backupId={backupId}
-                          isImporting={isImporting}
-                          onSelectFile={selectImportFile}
-                          onImport={importConfig}
-                          onExport={exportConfig}
-                          onClear={clearSelection}
-                        />
-                      </AccordionContent>
-                    </AccordionItem>
-                  </Accordion>
-
-                  <div className="pt-4">
-                    <Button
-                      onClick={handleSave}
-                      className="w-full h-12 text-base font-medium"
-                      disabled={isSaving}
-                    >
-                      {isSaving ? (
-                        <span className="inline-flex items-center gap-2">
-                          <Loader2 className="h-5 w-5 animate-spin" />
-                          {t("settings.saving")}
-                        </span>
-                      ) : (
-                        <>
-                          <Save className="mr-2 h-5 w-5" />
-                          {t("common.save")}
-                        </>
-                      )}
-                    </Button>
+              <TabsContent value="auth" className="space-y-6 mt-0 pb-4">
+                <motion.div
+                  initial={{ opacity: 0, y: 10 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  transition={{ duration: 0.3 }}
+                  className="space-y-6"
+                >
+                  <div className="flex items-center gap-3 px-1">
+                    <KeyRound className="h-5 w-5 text-primary" />
+                    <div>
+                      <h2 className="text-base font-semibold">
+                        {t("settings.authCenter.heading", {
+                          defaultValue: "认证中心",
+                        })}
+                      </h2>
+                      <p className="text-sm text-muted-foreground">
+                        {t("settings.authCenter.headingDescription", {
+                          defaultValue:
+                            "统一管理可跨应用复用的 OAuth 账号和默认认证来源。",
+                        })}
+                      </p>
+                    </div>
                   </div>
+
+                  <AuthCenterPanel />
+                </motion.div>
+              </TabsContent>
+
+              <TabsContent value="advanced" className="space-y-6 mt-0 pb-4">
+                {settings ? (
+                  <motion.div
+                    initial={{ opacity: 0, y: 10 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    transition={{ duration: 0.3 }}
+                    className="space-y-4"
+                  >
+                    <Accordion
+                      type="multiple"
+                      defaultValue={[]}
+                      className="w-full space-y-4"
+                    >
+                      <AccordionItem
+                        value="directory"
+                        className="rounded-xl glass-card overflow-hidden"
+                      >
+                        <AccordionTrigger className="px-6 py-4 hover:no-underline hover:bg-muted/50 data-[state=open]:bg-muted/50">
+                          <div className="flex items-center gap-3">
+                            <FolderSearch className="h-5 w-5 text-primary" />
+                            <div className="text-left">
+                              <h3 className="text-base font-semibold">
+                                {t("settings.advanced.configDir.title")}
+                              </h3>
+                              <p className="text-sm text-muted-foreground font-normal">
+                                {t("settings.advanced.configDir.description")}
+                              </p>
+                            </div>
+                          </div>
+                        </AccordionTrigger>
+                        <AccordionContent className="px-6 pb-6 pt-4 border-t border-border/50">
+                          {isRemoteServer && currentServer ? (
+                            <ServerDirectorySettings
+                              serverId={currentServer.id}
+                              configDirs={currentServer.configDirs ?? {}}
+                              onConfigDirsChange={handleServerConfigDirsChange}
+                            />
+                          ) : (
+                            <DirectorySettings
+                              appConfigDir={appConfigDir}
+                              resolvedDirs={resolvedDirs}
+                              onAppConfigChange={updateAppConfigDir}
+                              onBrowseAppConfig={browseAppConfigDir}
+                              onResetAppConfig={resetAppConfigDir}
+                              claudeDir={settings.claudeConfigDir}
+                              codexDir={settings.codexConfigDir}
+                              geminiDir={settings.geminiConfigDir}
+                              opencodeDir={settings.opencodeConfigDir}
+                              onDirectoryChange={updateDirectory}
+                              onBrowseDirectory={browseDirectory}
+                              onResetDirectory={resetDirectory}
+                            />
+                          )}
+                        </AccordionContent>
+                      </AccordionItem>
+
+                      <AccordionItem
+                        value="data"
+                        className="rounded-xl glass-card overflow-hidden"
+                      >
+                        <AccordionTrigger className="px-6 py-4 hover:no-underline hover:bg-muted/50 data-[state=open]:bg-muted/50">
+                          <div className="flex items-center gap-3">
+                            <Database className="h-5 w-5 text-blue-500" />
+                            <div className="text-left">
+                              <h3 className="text-base font-semibold">
+                                {t("settings.advanced.data.title")}
+                              </h3>
+                              <p className="text-sm text-muted-foreground font-normal">
+                                {t("settings.advanced.data.description")}
+                              </p>
+                            </div>
+                          </div>
+                        </AccordionTrigger>
+                        <AccordionContent className="px-6 pb-6 pt-4 border-t border-border/50">
+                          <ImportExportSection
+                            status={importStatus}
+                            selectedFile={selectedFile}
+                            errorMessage={errorMessage}
+                            backupId={backupId}
+                            isImporting={isImporting}
+                            onSelectFile={selectImportFile}
+                            onImport={importConfig}
+                            onExport={exportConfig}
+                            onClear={clearSelection}
+                          />
+                        </AccordionContent>
+                      </AccordionItem>
+
+                      <AccordionItem
+                        value="backup"
+                        className="rounded-xl glass-card overflow-hidden"
+                      >
+                        <AccordionTrigger className="px-6 py-4 hover:no-underline hover:bg-muted/50 data-[state=open]:bg-muted/50">
+                          <div className="flex items-center gap-3">
+                            <HardDriveDownload className="h-5 w-5 text-amber-500" />
+                            <div className="text-left">
+                              <h3 className="text-base font-semibold">
+                                {t("settings.advanced.backup.title", {
+                                  defaultValue: "Backup & Restore",
+                                })}
+                              </h3>
+                              <p className="text-sm text-muted-foreground font-normal">
+                                {t("settings.advanced.backup.description", {
+                                  defaultValue:
+                                    "Manage automatic backups, view and restore database snapshots",
+                                })}
+                              </p>
+                            </div>
+                          </div>
+                        </AccordionTrigger>
+                        <AccordionContent className="px-6 pb-6 pt-4 border-t border-border/50">
+                          <BackupListSection
+                            backupIntervalHours={settings.backupIntervalHours}
+                            backupRetainCount={settings.backupRetainCount}
+                            onSettingsChange={(updates) =>
+                              handleAutoSave(updates)
+                            }
+                          />
+                        </AccordionContent>
+                      </AccordionItem>
+
+                      <AccordionItem
+                        value="cloudSync"
+                        className="rounded-xl glass-card overflow-hidden"
+                      >
+                        <AccordionTrigger className="px-6 py-4 hover:no-underline hover:bg-muted/50 data-[state=open]:bg-muted/50">
+                          <div className="flex items-center gap-3">
+                            <Cloud className="h-5 w-5 text-blue-500" />
+                            <div className="text-left">
+                              <h3 className="text-base font-semibold">
+                                {t("settings.advanced.cloudSync.title")}
+                              </h3>
+                              <p className="text-sm text-muted-foreground font-normal">
+                                {t("settings.advanced.cloudSync.description")}
+                              </p>
+                            </div>
+                          </div>
+                        </AccordionTrigger>
+                        <AccordionContent className="px-6 pb-6 pt-4 border-t border-border/50">
+                          <WebdavSyncSection
+                            config={settings?.webdavSync}
+                            settings={settings}
+                            onAutoSave={handleAutoSave}
+                          />
+                        </AccordionContent>
+                      </AccordionItem>
+
+                      <AccordionItem
+                        value="test"
+                        className="rounded-xl glass-card overflow-hidden"
+                      >
+                        <AccordionTrigger className="px-6 py-4 hover:no-underline hover:bg-muted/50 data-[state=open]:bg-muted/50">
+                          <div className="flex items-center gap-3">
+                            <FlaskConical className="h-5 w-5 text-emerald-500" />
+                            <div className="text-left">
+                              <h3 className="text-base font-semibold">
+                                {t("settings.advanced.modelTest.title")}
+                              </h3>
+                              <p className="text-sm text-muted-foreground font-normal">
+                                {t("settings.advanced.modelTest.description")}
+                              </p>
+                            </div>
+                          </div>
+                        </AccordionTrigger>
+                        <AccordionContent className="px-6 pb-6 pt-4 border-t border-border/50">
+                          <ModelTestConfigPanel />
+                        </AccordionContent>
+                      </AccordionItem>
+
+                      <AccordionItem
+                        value="logConfig"
+                        className="rounded-xl glass-card overflow-hidden"
+                      >
+                        <AccordionTrigger className="px-6 py-4 hover:no-underline hover:bg-muted/50 data-[state=open]:bg-muted/50">
+                          <div className="flex items-center gap-3">
+                            <ScrollText className="h-5 w-5 text-cyan-500" />
+                            <div className="text-left">
+                              <h3 className="text-base font-semibold">
+                                {t("settings.advanced.logConfig.title")}
+                              </h3>
+                              <p className="text-sm text-muted-foreground font-normal">
+                                {t("settings.advanced.logConfig.description")}
+                              </p>
+                            </div>
+                          </div>
+                        </AccordionTrigger>
+                        <AccordionContent className="px-6 pb-6 pt-4 border-t border-border/50">
+                          <LogConfigPanel />
+                        </AccordionContent>
+                      </AccordionItem>
+                    </Accordion>
+                  </motion.div>
+                ) : null}
+              </TabsContent>
+
+              <TabsContent value="about" className="mt-0">
+                <AboutSection isPortable={isPortable} />
+              </TabsContent>
+
+              <TabsContent value="usage" className="mt-0">
+                <UsageDashboard />
+              </TabsContent>
+            </div>
+
+            {activeTab === "advanced" && settings && (
+              <div
+                className="flex-shrink-0 py-4 border-t border-border-default"
+                style={{ backgroundColor: "hsl(var(--background))" }}
+              >
+                <div className="px-6 flex items-center justify-end gap-3">
+                  <Button onClick={handleSave} disabled={isSaving}>
+                    {isSaving ? (
+                      <span className="inline-flex items-center gap-2">
+                        <Loader2 className="h-4 w-4 animate-spin" />
+                        {t("settings.saving")}
+                      </span>
+                    ) : (
+                      <>
+                        <Save className="mr-2 h-4 w-4" />
+                        {t("common.save")}
+                      </>
+                    )}
+                  </Button>
                 </div>
-              ) : null}
-            </TabsContent>
-
-            <TabsContent value="about" className="mt-0">
-              <AboutSection isPortable={isPortable} />
-            </TabsContent>
-
-            <TabsContent value="usage" className="mt-0">
-              <UsageDashboard />
-            </TabsContent>
+              </div>
+            )}
           </div>
         </Tabs>
       )}

@@ -100,6 +100,7 @@ impl ProviderStore for LocalProviderStore<'_> {
             meta: None,
             icon: None,
             icon_color: None,
+            in_failover_queue: false,
             is_proxy_target: None,
         };
 

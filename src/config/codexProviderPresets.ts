@@ -6,6 +6,7 @@ import type { PresetTheme } from "./claudeProviderPresets";
 
 export interface CodexProviderPreset {
   name: string;
+  nameKey?: string; // i18n key for localized display name
   websiteUrl: string;
   // 第三方供应商可提供单独的获取 API Key 链接
   apiKeyUrl?: string;
@@ -40,7 +41,7 @@ export function generateThirdPartyAuth(apiKey: string): Record<string, any> {
 export function generateThirdPartyConfig(
   providerName: string,
   baseUrl: string,
-  modelName = "gpt-5.1-codex",
+  modelName = "gpt-5.4",
 ): string {
   // 清理供应商名称，确保符合TOML键名规范
   const cleanProviderName =
@@ -80,12 +81,12 @@ export const codexProviderPresets: CodexProviderPreset[] = [
   {
     name: "Azure OpenAI",
     websiteUrl:
-      "https://learn.microsoft.com/azure/ai-services/openai/how-to/overview",
+      "https://learn.microsoft.com/en-us/azure/ai-foundry/openai/how-to/codex",
     category: "third_party",
     isOfficial: true,
     auth: generateThirdPartyAuth(""),
     config: `model_provider = "azure"
-model = "gpt-5.1-codex"
+model = "gpt-5.4"
 model_reasoning_effort = "high"
 disable_response_storage = true
 
@@ -113,7 +114,7 @@ requires_openai_auth = true`,
     config: generateThirdPartyConfig(
       "aihubmix",
       "https://aihubmix.com/v1",
-      "gpt-5.1-codex",
+      "gpt-5.4",
     ),
     endpointCandidates: [
       "https://aihubmix.com/v1",
@@ -128,9 +129,11 @@ requires_openai_auth = true`,
     config: generateThirdPartyConfig(
       "dmxapi",
       "https://www.dmxapi.cn/v1",
-      "gpt-5.1-codex",
+      "gpt-5.4",
     ),
     endpointCandidates: ["https://www.dmxapi.cn/v1"],
+    isPartner: true, // 合作伙伴
+    partnerPromotionKey: "dmxapi", // 促销信息 i18n key
   },
   {
     name: "PackyCode",
@@ -141,7 +144,7 @@ requires_openai_auth = true`,
     config: generateThirdPartyConfig(
       "packycode",
       "https://www.packyapi.com/v1",
-      "gpt-5.1-codex",
+      "gpt-5.4",
     ),
     endpointCandidates: [
       "https://www.packyapi.com/v1",
@@ -150,5 +153,216 @@ requires_openai_auth = true`,
     isPartner: true, // 合作伙伴
     partnerPromotionKey: "packycode", // 促销信息 i18n key
     icon: "packycode",
+  },
+  {
+    name: "Cubence",
+    websiteUrl: "https://cubence.com",
+    apiKeyUrl: "https://cubence.com/signup?code=CCSWITCH&source=ccs",
+    auth: generateThirdPartyAuth(""),
+    config: generateThirdPartyConfig(
+      "cubence",
+      "https://api.cubence.com/v1",
+      "gpt-5.4",
+    ),
+    endpointCandidates: [
+      "https://api.cubence.com/v1",
+      "https://api-cf.cubence.com/v1",
+      "https://api-dmit.cubence.com/v1",
+      "https://api-bwg.cubence.com/v1",
+    ],
+    category: "third_party",
+    isPartner: true, // 合作伙伴
+    partnerPromotionKey: "cubence", // 促销信息 i18n key
+    icon: "cubence",
+    iconColor: "#000000",
+  },
+  {
+    name: "AIGoCode",
+    websiteUrl: "https://aigocode.com",
+    apiKeyUrl: "https://aigocode.com/invite/CC-SWITCH",
+    category: "third_party",
+    auth: generateThirdPartyAuth(""),
+    config: generateThirdPartyConfig(
+      "aigocode",
+      "https://api.aigocode.com",
+      "gpt-5.4",
+    ),
+    endpointCandidates: ["https://api.aigocode.com"],
+    isPartner: true, // 合作伙伴
+    partnerPromotionKey: "aigocode", // 促销信息 i18n key
+    icon: "aigocode",
+    iconColor: "#5B7FFF",
+  },
+  {
+    name: "RightCode",
+    websiteUrl: "https://www.right.codes",
+    apiKeyUrl: "https://www.right.codes/register?aff=CCSWITCH",
+    auth: generateThirdPartyAuth(""),
+    config: generateThirdPartyConfig(
+      "rightcode",
+      "https://right.codes/codex/v1",
+      "gpt-5.4",
+    ),
+    category: "third_party",
+    isPartner: true,
+    partnerPromotionKey: "rightcode",
+    icon: "rc",
+    iconColor: "#E96B2C",
+  },
+  {
+    name: "AICodeMirror",
+    websiteUrl: "https://www.aicodemirror.com",
+    apiKeyUrl: "https://www.aicodemirror.com/register?invitecode=9915W3",
+    auth: generateThirdPartyAuth(""),
+    config: generateThirdPartyConfig(
+      "aicodemirror",
+      "https://api.aicodemirror.com/api/codex/backend-api/codex",
+      "gpt-5.4",
+    ),
+    endpointCandidates: [
+      "https://api.aicodemirror.com/api/codex/backend-api/codex",
+      "https://api.claudecode.net.cn/api/codex/backend-api/codex",
+    ],
+    isPartner: true,
+    partnerPromotionKey: "aicodemirror",
+    icon: "aicodemirror",
+    iconColor: "#000000",
+  },
+  {
+    name: "AICoding",
+    websiteUrl: "https://aicoding.sh",
+    apiKeyUrl: "https://aicoding.sh/i/CCSWITCH",
+    auth: generateThirdPartyAuth(""),
+    config: generateThirdPartyConfig(
+      "aicoding",
+      "https://api.aicoding.sh",
+      "gpt-5.4",
+    ),
+    endpointCandidates: ["https://api.aicoding.sh"],
+    isPartner: true,
+    partnerPromotionKey: "aicoding",
+    icon: "aicoding",
+    iconColor: "#000000",
+  },
+  {
+    name: "CrazyRouter",
+    websiteUrl: "https://www.crazyrouter.com",
+    apiKeyUrl: "https://www.crazyrouter.com/register?aff=OZcm&ref=cc-switch",
+    auth: generateThirdPartyAuth(""),
+    config: generateThirdPartyConfig(
+      "crazyrouter",
+      "https://crazyrouter.com/v1",
+      "gpt-5.4",
+    ),
+    endpointCandidates: ["https://crazyrouter.com/v1"],
+    isPartner: true,
+    partnerPromotionKey: "crazyrouter",
+    icon: "crazyrouter",
+    iconColor: "#000000",
+  },
+  {
+    name: "SSSAiCode",
+    websiteUrl: "https://www.sssaicode.com",
+    apiKeyUrl: "https://www.sssaicode.com/register?ref=DCP0SM",
+    auth: generateThirdPartyAuth(""),
+    config: generateThirdPartyConfig(
+      "sssaicode",
+      "https://node-hk.sssaicode.com/api/v1",
+      "gpt-5.4",
+    ),
+    endpointCandidates: [
+      "https://node-hk.sssaicode.com/api/v1",
+      "https://claude2.sssaicode.com/api/v1",
+      "https://anti.sssaicode.com/api/v1",
+    ],
+    category: "third_party",
+    isPartner: true, // 合作伙伴
+    partnerPromotionKey: "sssaicode", // 促销信息 i18n key
+    icon: "sssaicode",
+    iconColor: "#000000",
+  },
+  {
+    name: "Compshare",
+    nameKey: "providerForm.presets.ucloud",
+    websiteUrl: "https://www.compshare.cn",
+    apiKeyUrl:
+      "https://www.compshare.cn/coding-plan?ytag=GPU_YY_YX_git_cc-switch",
+    auth: generateThirdPartyAuth(""),
+    config: generateThirdPartyConfig(
+      "compshare",
+      "https://api.modelverse.cn/v1",
+      "gpt-5.4",
+    ),
+    endpointCandidates: ["https://api.modelverse.cn/v1"],
+    category: "aggregator",
+    isPartner: true, // 合作伙伴
+    partnerPromotionKey: "ucloud", // 促销信息 i18n key
+    icon: "ucloud",
+    iconColor: "#000000",
+  },
+  {
+    name: "Micu",
+    websiteUrl: "https://www.openclaudecode.cn",
+    apiKeyUrl: "https://www.openclaudecode.cn/register?aff=aOYQ",
+    auth: generateThirdPartyAuth(""),
+    config: generateThirdPartyConfig(
+      "micu",
+      "https://www.openclaudecode.cn/v1",
+      "gpt-5.4",
+    ),
+    endpointCandidates: ["https://www.openclaudecode.cn/v1"],
+    category: "third_party",
+    isPartner: true, // 合作伙伴
+    partnerPromotionKey: "micu", // 促销信息 i18n key
+    icon: "micu",
+    iconColor: "#000000",
+  },
+  {
+    name: "X-Code API",
+    websiteUrl: "https://x-code.cc",
+    apiKeyUrl: "https://x-code.cc",
+    auth: generateThirdPartyAuth(""),
+    config: generateThirdPartyConfig(
+      "x-code",
+      "https://x-code.cc/v1",
+      "gpt-5.4",
+    ),
+    endpointCandidates: ["https://x-code.cc/v1"],
+    category: "third_party",
+    isPartner: true, // 合作伙伴
+    partnerPromotionKey: "x-code", // 促销信息 i18n key
+    icon: "x-code",
+    iconColor: "#000000",
+  },
+  {
+    name: "CTok.ai",
+    websiteUrl: "https://ctok.ai",
+    apiKeyUrl: "https://ctok.ai",
+    auth: generateThirdPartyAuth(""),
+    config: generateThirdPartyConfig(
+      "ctok",
+      "https://api.ctok.ai/v1",
+      "gpt-5.4",
+    ),
+    endpointCandidates: ["https://api.ctok.ai/v1"],
+    category: "third_party",
+    isPartner: true, // 合作伙伴
+    partnerPromotionKey: "ctok", // 促销信息 i18n key
+    icon: "ctok",
+    iconColor: "#000000",
+  },
+  {
+    name: "OpenRouter",
+    websiteUrl: "https://openrouter.ai",
+    apiKeyUrl: "https://openrouter.ai/keys",
+    auth: generateThirdPartyAuth(""),
+    config: generateThirdPartyConfig(
+      "openrouter",
+      "https://openrouter.ai/api/v1",
+      "gpt-5.4",
+    ),
+    category: "aggregator",
+    icon: "openrouter",
+    iconColor: "#6566F1",
   },
 ];

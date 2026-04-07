@@ -28,6 +28,8 @@ const PromptFormPanel: React.FC<PromptFormPanelProps> = ({
     claude: "CLAUDE.md",
     codex: "AGENTS.md",
     gemini: "GEMINI.md",
+    opencode: "AGENTS.md",
+    openclaw: "AGENTS.md",
   };
   const filename = filenameMap[appId];
   const [name, setName] = useState("");
@@ -60,7 +62,7 @@ const PromptFormPanel: React.FC<PromptFormPanelProps> = ({
   }, [initialData]);
 
   const handleSave = async () => {
-    if (!name.trim() || !content.trim()) {
+    if (!name.trim()) {
       return;
     }
 
@@ -99,7 +101,7 @@ const PromptFormPanel: React.FC<PromptFormPanelProps> = ({
         <Button
           type="button"
           onClick={handleSave}
-          disabled={!name.trim() || !content.trim() || saving}
+          disabled={!name.trim() || saving}
           className="bg-primary text-primary-foreground hover:bg-primary/90 disabled:opacity-50 disabled:cursor-not-allowed"
         >
           {saving ? t("common.saving") : t("common.save")}

@@ -1,5 +1,7 @@
 import { render, screen, fireEvent } from "@testing-library/react";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { describe, it, expect, vi, beforeEach } from "vitest";
+import type { ReactElement } from "react";
 import type { Provider } from "@/types";
 import { ProviderList } from "@/components/providers/ProviderList";
 
@@ -79,6 +81,22 @@ vi.mock("@dnd-kit/sortable", async () => {
   };
 });
 
+// Mock hooks that use QueryClient
+vi.mock("@/hooks/useStreamCheck", () => ({
+  useStreamCheck: () => ({
+    checkProvider: vi.fn(),
+    isChecking: () => false,
+  }),
+}));
+
+vi.mock("@/lib/query/failover", () => ({
+  useAutoFailoverEnabled: () => ({ data: false }),
+  useFailoverQueue: () => ({ data: [] }),
+  useAddToFailoverQueue: () => ({ mutate: vi.fn() }),
+  useRemoveFromFailoverQueue: () => ({ mutate: vi.fn() }),
+  useReorderFailoverQueue: () => ({ mutate: vi.fn() }),
+}));
+
 function createProvider(overrides: Partial<Provider> = {}): Provider {
   return {
     id: overrides.id ?? "provider-1",
@@ -90,6 +108,16 @@ function createProvider(overrides: Partial<Provider> = {}): Provider {
     meta: overrides.meta,
     websiteUrl: overrides.websiteUrl,
   };
+}
+
+function renderWithQueryClient(ui: ReactElement) {
+  const queryClient = new QueryClient({
+    defaultOptions: { queries: { retry: false } },
+  });
+
+  return render(
+    <QueryClientProvider client={queryClient}>{ui}</QueryClientProvider>,
+  );
 }
 
 beforeEach(() => {
@@ -115,7 +143,7 @@ beforeEach(() => {
 
 describe("ProviderList Component", () => {
   it("should render skeleton placeholders when loading", () => {
-    const { container } = render(
+    const { container } = renderWithQueryClient(
       <ProviderList
         providers={{}}
         currentProviderId=""
@@ -143,7 +171,7 @@ describe("ProviderList Component", () => {
       handleDragEnd: vi.fn(),
     });
 
-    render(
+    renderWithQueryClient(
       <ProviderList
         providers={{}}
         currentProviderId=""
@@ -182,7 +210,7 @@ describe("ProviderList Component", () => {
       handleDragEnd: vi.fn(),
     });
 
-    render(
+    renderWithQueryClient(
       <ProviderList
         providers={{ a: providerA, b: providerB }}
         currentProviderId="b"
@@ -234,5 +262,48 @@ describe("ProviderList Component", () => {
       { a: providerA, b: providerB },
       "claude",
     );
+  });
+
+  it("filters providers with the search input", () => {
+    const providerAlpha = createProvider({ id: "alpha", name: "Alpha Labs" });
+    const providerBeta = createProvider({ id: "beta", name: "Beta Works" });
+
+    useDragSortMock.mockReturnValue({
+      sortedProviders: [providerAlpha, providerBeta],
+      sensors: [],
+      handleDragEnd: vi.fn(),
+    });
+
+    renderWithQueryClient(
+      <ProviderList
+        providers={{ alpha: providerAlpha, beta: providerBeta }}
+        currentProviderId=""
+        appId="claude"
+        onSwitch={vi.fn()}
+        onEdit={vi.fn()}
+        onDelete={vi.fn()}
+        onDuplicate={vi.fn()}
+        onOpenWebsite={vi.fn()}
+      />,
+    );
+
+    fireEvent.keyDown(window, { key: "f", metaKey: true });
+    const searchInput = screen.getByPlaceholderText(
+      "Search name, notes, or URL...",
+    );
+    // Initially both providers are rendered
+    expect(screen.getByTestId("provider-card-alpha")).toBeInTheDocument();
+    expect(screen.getByTestId("provider-card-beta")).toBeInTheDocument();
+
+    fireEvent.change(searchInput, { target: { value: "beta" } });
+    expect(screen.queryByTestId("provider-card-alpha")).not.toBeInTheDocument();
+    expect(screen.getByTestId("provider-card-beta")).toBeInTheDocument();
+
+    fireEvent.change(searchInput, { target: { value: "gamma" } });
+    expect(screen.queryByTestId("provider-card-alpha")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("provider-card-beta")).not.toBeInTheDocument();
+    expect(
+      screen.getByText("No providers match your search."),
+    ).toBeInTheDocument();
   });
 });

@@ -11,14 +11,26 @@ import {
 } from "recharts";
 import { useUsageTrends } from "@/lib/query/usage";
 import { Loader2 } from "lucide-react";
+import {
+  fmtInt,
+  fmtUsd,
+  getLocaleFromLanguage,
+  parseFiniteNumber,
+} from "./format";
 
 interface UsageTrendChartProps {
   days: number;
+  refreshIntervalMs: number;
 }
 
-export function UsageTrendChart({ days }: UsageTrendChartProps) {
-  const { t } = useTranslation();
-  const { data: trends, isLoading } = useUsageTrends(days);
+export function UsageTrendChart({
+  days,
+  refreshIntervalMs,
+}: UsageTrendChartProps) {
+  const { t, i18n } = useTranslation();
+  const { data: trends, isLoading } = useUsageTrends(days, {
+    refetchInterval: refreshIntervalMs > 0 ? refreshIntervalMs : false,
+  });
 
   if (isLoading) {
     return (
@@ -29,42 +41,35 @@ export function UsageTrendChart({ days }: UsageTrendChartProps) {
   }
 
   const isToday = days === 1;
+  const language = i18n.resolvedLanguage || i18n.language || "en";
+  const dateLocale = getLocaleFromLanguage(language);
   const chartData =
     trends?.map((stat) => {
       const pointDate = new Date(stat.date);
+      const cost = parseFiniteNumber(stat.totalCost);
       return {
         rawDate: stat.date,
         label: isToday
-          ? pointDate.toLocaleTimeString("zh-CN", { hour: "2-digit" })
-          : pointDate.toLocaleDateString("zh-CN", {
+          ? pointDate.toLocaleString(dateLocale, {
+              month: "2-digit",
+              day: "2-digit",
+              hour: "2-digit",
+              minute: "2-digit",
+            })
+          : pointDate.toLocaleDateString(dateLocale, {
               month: "2-digit",
               day: "2-digit",
             }),
         hour: pointDate.getHours(),
         inputTokens: stat.totalInputTokens,
         outputTokens: stat.totalOutputTokens,
-        cost: parseFloat(stat.totalCost),
+        cacheCreationTokens: stat.totalCacheCreationTokens,
+        cacheReadTokens: stat.totalCacheReadTokens,
+        cost: cost ?? null,
       };
     }) || [];
 
-  const hourlyData = (() => {
-    if (!isToday) return chartData;
-    const map = new Map<number, (typeof chartData)[number]>();
-    chartData.forEach((point) => {
-      map.set(point.hour ?? 0, point);
-    });
-    return Array.from({ length: 24 }, (_, hour) => {
-      const bucket = map.get(hour);
-      return {
-        label: `${hour.toString().padStart(2, "0")}:00`,
-        inputTokens: bucket?.inputTokens ?? 0,
-        outputTokens: bucket?.outputTokens ?? 0,
-        cost: bucket?.cost ?? 0,
-      };
-    });
-  })();
-
-  const displayData = isToday ? hourlyData : chartData;
+  const displayData = chartData;
 
   const CustomTooltip = ({ active, payload, label }: any) => {
     if (active && payload && payload.length) {
@@ -83,9 +88,9 @@ export function UsageTrendChart({ days }: UsageTrendChartProps) {
               />
               <span className="font-medium">{entry.name}:</span>
               <span>
-                {entry.name.includes(t("usage.cost", "成本"))
-                  ? `$${typeof entry.value === "number" ? entry.value.toFixed(6) : entry.value}`
-                  : entry.value.toLocaleString()}
+                {entry.dataKey === "cost"
+                  ? fmtUsd(entry.value, 6)
+                  : fmtInt(entry.value, dateLocale)}
               </span>
             </div>
           ))}
@@ -124,6 +129,20 @@ export function UsageTrendChart({ days }: UsageTrendChartProps) {
               <linearGradient id="colorOutput" x1="0" y1="0" x2="0" y2="1">
                 <stop offset="5%" stopColor="#22c55e" stopOpacity={0.2} />
                 <stop offset="95%" stopColor="#22c55e" stopOpacity={0} />
+              </linearGradient>
+              <linearGradient
+                id="colorCacheCreation"
+                x1="0"
+                y1="0"
+                x2="0"
+                y2="1"
+              >
+                <stop offset="5%" stopColor="#f97316" stopOpacity={0.2} />
+                <stop offset="95%" stopColor="#f97316" stopOpacity={0} />
+              </linearGradient>
+              <linearGradient id="colorCacheRead" x1="0" y1="0" x2="0" y2="1">
+                <stop offset="5%" stopColor="#a855f7" stopOpacity={0.2} />
+                <stop offset="95%" stopColor="#a855f7" stopOpacity={0} />
               </linearGradient>
             </defs>
             <CartesianGrid
@@ -174,6 +193,26 @@ export function UsageTrendChart({ days }: UsageTrendChartProps) {
               stroke="#22c55e"
               fillOpacity={1}
               fill="url(#colorOutput)"
+              strokeWidth={2}
+            />
+            <Area
+              yAxisId="tokens"
+              type="monotone"
+              dataKey="cacheCreationTokens"
+              name={t("usage.cacheCreationTokens", "缓存创建")}
+              stroke="#f97316"
+              fillOpacity={1}
+              fill="url(#colorCacheCreation)"
+              strokeWidth={2}
+            />
+            <Area
+              yAxisId="tokens"
+              type="monotone"
+              dataKey="cacheReadTokens"
+              name={t("usage.cacheReadTokens", "缓存命中")}
+              stroke="#a855f7"
+              fillOpacity={1}
+              fill="url(#colorCacheRead)"
               strokeWidth={2}
             />
             <Area

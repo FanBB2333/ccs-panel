@@ -51,28 +51,28 @@ export function ServerCard({
   return (
     <div
       className={cn(
-        "group relative flex flex-col p-5 rounded-xl border transition-all duration-200 cursor-pointer",
+        "group relative flex h-full min-h-[220px] flex-col rounded-2xl border p-6 transition-all duration-200 cursor-pointer",
         "bg-card hover:bg-accent/50",
         "border-border hover:border-primary/30",
-        "hover:shadow-lg hover:shadow-primary/5",
-        isConnected && "ring-1 ring-emerald-500/20"
+        "hover:shadow-xl hover:shadow-primary/5",
+        isConnected && "ring-1 ring-emerald-500/20",
       )}
       onClick={onClick}
     >
       {/* 顶部：图标和菜单 */}
-      <div className="flex items-start justify-between mb-4">
+      <div className="mb-5 flex items-start justify-between gap-4">
         <div
           className={cn(
-            "flex items-center justify-center w-12 h-12 rounded-xl",
+            "flex h-14 w-14 items-center justify-center rounded-2xl",
             isLocal
               ? "bg-blue-500/10 text-blue-500"
-              : "bg-orange-500/10 text-orange-500"
+              : "bg-orange-500/10 text-orange-500",
           )}
         >
           {isLocal ? (
-            <Laptop className="w-6 h-6" />
+            <Laptop className="h-7 w-7" />
           ) : (
-            <Server className="w-6 h-6" />
+            <Server className="h-7 w-7" />
           )}
         </div>
 
@@ -130,21 +130,21 @@ export function ServerCard({
       </div>
 
       {/* 服务器名称 */}
-      <h3 className="text-lg font-semibold text-foreground mb-1 truncate">
+      <h3 className="mb-1 text-xl font-semibold text-foreground break-words">
         {isLocal
           ? t("server.localServer", { defaultValue: "本地服务器" })
           : server.name}
       </h3>
 
       {/* 连接信息 */}
-      <p className="text-sm text-muted-foreground mb-3 truncate">
+      <p className="mb-4 text-sm text-muted-foreground break-all">
         {isLocal
           ? t("server.localDescription", { defaultValue: "本机" })
           : server.sshConfig?.host || "SSH"}
       </p>
 
       {/* 状态指示器 */}
-      <div className="flex items-center gap-2 mt-auto">
+      <div className="mt-auto flex items-center gap-2">
         {isCurrentConnecting ? (
           <Loader2 className={cn("w-4 h-4 animate-spin", statusColor)} />
         ) : isConnected ? (

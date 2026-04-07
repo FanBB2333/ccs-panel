@@ -6,9 +6,10 @@ use super::*;
 use crate::app_config::MultiAppConfig;
 use crate::provider::{Provider, ProviderManager};
 use indexmap::IndexMap;
-use rusqlite::Connection;
+use rusqlite::{params, Connection};
 use serde_json::json;
 use std::collections::HashMap;
+use tempfile::NamedTempFile;
 
 const LEGACY_SCHEMA_SQL: &str = r#"
     CREATE TABLE providers (
@@ -51,9 +52,76 @@ const LEGACY_SCHEMA_SQL: &str = r#"
     );
 "#;
 
+// v3.8.x（schema v1）的真实表结构快照：用于验证从 v3.8.* 升级到当前版本的迁移链路
+// 参考：tag v3.8.3 的 src-tauri/src/database/schema.rs
+const V3_8_SCHEMA_V1_SQL: &str = r#"
+    CREATE TABLE providers (
+        id TEXT NOT NULL,
+        app_type TEXT NOT NULL,
+        name TEXT NOT NULL,
+        settings_config TEXT NOT NULL,
+        website_url TEXT,
+        category TEXT,
+        created_at INTEGER,
+        sort_index INTEGER,
+        notes TEXT,
+        icon TEXT,
+        icon_color TEXT,
+        meta TEXT NOT NULL DEFAULT '{}',
+        is_current BOOLEAN NOT NULL DEFAULT 0,
+        PRIMARY KEY (id, app_type)
+    );
+    CREATE TABLE provider_endpoints (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        provider_id TEXT NOT NULL,
+        app_type TEXT NOT NULL,
+        url TEXT NOT NULL,
+        added_at INTEGER,
+        FOREIGN KEY (provider_id, app_type) REFERENCES providers(id, app_type) ON DELETE CASCADE
+    );
+    CREATE TABLE mcp_servers (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        server_config TEXT NOT NULL,
+        description TEXT,
+        homepage TEXT,
+        docs TEXT,
+        tags TEXT NOT NULL DEFAULT '[]',
+        enabled_claude BOOLEAN NOT NULL DEFAULT 0,
+        enabled_codex BOOLEAN NOT NULL DEFAULT 0,
+        enabled_gemini BOOLEAN NOT NULL DEFAULT 0
+    );
+    CREATE TABLE prompts (
+        id TEXT NOT NULL,
+        app_type TEXT NOT NULL,
+        name TEXT NOT NULL,
+        content TEXT NOT NULL,
+        description TEXT,
+        enabled BOOLEAN NOT NULL DEFAULT 1,
+        created_at INTEGER,
+        updated_at INTEGER,
+        PRIMARY KEY (id, app_type)
+    );
+    CREATE TABLE skills (
+        key TEXT PRIMARY KEY,
+        installed BOOLEAN NOT NULL DEFAULT 0,
+        installed_at INTEGER NOT NULL DEFAULT 0
+    );
+    CREATE TABLE skill_repos (
+        owner TEXT NOT NULL,
+        name TEXT NOT NULL,
+        branch TEXT NOT NULL DEFAULT 'main',
+        enabled BOOLEAN NOT NULL DEFAULT 1,
+        PRIMARY KEY (owner, name)
+    );
+    CREATE TABLE settings (
+        key TEXT PRIMARY KEY,
+        value TEXT
+    );
+"#;
+
 #[derive(Debug)]
 struct ColumnInfo {
-    name: String,
     r#type: String,
     notnull: i64,
     default: Option<String>,
@@ -65,10 +133,9 @@ fn get_column_info(conn: &Connection, table: &str, column: &str) -> ColumnInfo {
         .expect("prepare pragma");
     let mut rows = stmt.query([]).expect("query pragma");
     while let Some(row) = rows.next().expect("read row") {
-        let name: String = row.get(1).expect("name");
-        if name.eq_ignore_ascii_case(column) {
+        let column_name: String = row.get(1).expect("name");
+        if column_name.eq_ignore_ascii_case(column) {
             return ColumnInfo {
-                name,
                 r#type: row.get::<_, String>(2).expect("type"),
                 notnull: row.get::<_, i64>(3).expect("notnull"),
                 default: row.get::<_, Option<String>>(4).ok().flatten(),
@@ -85,7 +152,7 @@ fn normalize_default(default: &Option<String>) -> Option<String> {
 }
 
 #[test]
-fn migration_sets_user_version_when_missing() {
+fn schema_migration_sets_user_version_when_missing() {
     let conn = Connection::open_in_memory().expect("open memory db");
 
     Database::create_tables_on_conn(&conn).expect("create tables");
@@ -103,7 +170,7 @@ fn migration_sets_user_version_when_missing() {
 }
 
 #[test]
-fn migration_rejects_future_version() {
+fn schema_migration_rejects_future_version() {
     let conn = Connection::open_in_memory().expect("open memory db");
     Database::create_tables_on_conn(&conn).expect("create tables");
     Database::set_user_version(&conn, SCHEMA_VERSION + 1).expect("set future version");
@@ -117,7 +184,7 @@ fn migration_rejects_future_version() {
 }
 
 #[test]
-fn migration_adds_missing_columns_for_providers() {
+fn schema_migration_adds_missing_columns_for_providers() {
     let conn = Connection::open_in_memory().expect("open memory db");
 
     // 创建旧版 providers 表，缺少新增列
@@ -158,7 +225,7 @@ fn migration_adds_missing_columns_for_providers() {
 }
 
 #[test]
-fn migration_aligns_column_defaults_and_types() {
+fn schema_migration_aligns_column_defaults_and_types() {
     let conn = Connection::open_in_memory().expect("open memory db");
     conn.execute_batch(LEGACY_SCHEMA_SQL)
         .expect("seed old schema");
@@ -202,7 +269,319 @@ fn migration_aligns_column_defaults_and_types() {
 }
 
 #[test]
-fn dry_run_does_not_write_to_disk() {
+fn schema_migration_supports_v1_skills_without_installed_at() {
+    let conn = Connection::open_in_memory().expect("open memory db");
+    conn.execute_batch(LEGACY_SCHEMA_SQL)
+        .expect("seed old schema without installed_at");
+    Database::set_user_version(&conn, 1).expect("set legacy version");
+
+    conn.execute(
+        "INSERT INTO skills (key, installed) VALUES (?1, ?2)",
+        params!["claude:test-skill", true],
+    )
+    .expect("insert legacy skill");
+
+    Database::apply_schema_migrations_on_conn(&conn).expect("apply migrations");
+
+    assert!(
+        Database::has_column(&conn, "skills", "enabled_claude").expect("check final skills schema"),
+        "skills table should be upgraded to unified v3 schema"
+    );
+
+    let pending: String = conn
+        .query_row(
+            "SELECT value FROM settings WHERE key = 'skills_ssot_migration_pending'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("read pending migration flag");
+    assert_eq!(pending, "true");
+
+    let snapshot: String = conn
+        .query_row(
+            "SELECT value FROM settings WHERE key = 'skills_ssot_migration_snapshot'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("read migration snapshot");
+    assert!(
+        snapshot.contains("\"directory\":\"test-skill\""),
+        "snapshot should preserve migrated directory: {snapshot}"
+    );
+    assert!(
+        snapshot.contains("\"app_type\":\"claude\""),
+        "snapshot should preserve migrated app type: {snapshot}"
+    );
+
+    assert_eq!(
+        Database::get_user_version(&conn).expect("version after migration"),
+        SCHEMA_VERSION
+    );
+}
+
+#[test]
+fn schema_create_tables_include_pricing_model_columns() {
+    let conn = Connection::open_in_memory().expect("open memory db");
+    Database::create_tables_on_conn(&conn).expect("create tables");
+
+    let multiplier = get_column_info(&conn, "proxy_config", "default_cost_multiplier");
+    assert_eq!(multiplier.r#type, "TEXT");
+    assert_eq!(multiplier.notnull, 1);
+    assert_eq!(normalize_default(&multiplier.default).as_deref(), Some("1"));
+
+    let pricing_source = get_column_info(&conn, "proxy_config", "pricing_model_source");
+    assert_eq!(pricing_source.r#type, "TEXT");
+    assert_eq!(pricing_source.notnull, 1);
+    assert_eq!(
+        normalize_default(&pricing_source.default).as_deref(),
+        Some("response")
+    );
+
+    let request_model = get_column_info(&conn, "proxy_request_logs", "request_model");
+    assert_eq!(request_model.r#type, "TEXT");
+    assert_eq!(request_model.notnull, 0);
+}
+
+#[test]
+fn schema_migration_v4_adds_pricing_model_columns() {
+    let conn = Connection::open_in_memory().expect("open memory db");
+    conn.execute_batch(
+        r#"
+        CREATE TABLE providers (
+            id TEXT NOT NULL,
+            app_type TEXT NOT NULL,
+            name TEXT NOT NULL,
+            settings_config TEXT NOT NULL DEFAULT '{}',
+            meta TEXT NOT NULL DEFAULT '{}',
+            PRIMARY KEY (id, app_type)
+        );
+        CREATE TABLE proxy_config (app_type TEXT PRIMARY KEY);
+        CREATE TABLE proxy_request_logs (request_id TEXT PRIMARY KEY, model TEXT NOT NULL);
+        CREATE TABLE mcp_servers (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            server_config TEXT NOT NULL,
+            enabled_claude INTEGER NOT NULL DEFAULT 0,
+            enabled_codex INTEGER NOT NULL DEFAULT 0,
+            enabled_gemini INTEGER NOT NULL DEFAULT 0,
+            enabled_opencode INTEGER NOT NULL DEFAULT 0
+        );
+        "#,
+    )
+    .expect("seed v4 schema");
+
+    Database::set_user_version(&conn, 4).expect("set user_version=4");
+    Database::apply_schema_migrations_on_conn(&conn).expect("apply migrations");
+
+    let multiplier = get_column_info(&conn, "proxy_config", "default_cost_multiplier");
+    assert_eq!(multiplier.r#type, "TEXT");
+    assert_eq!(multiplier.notnull, 1);
+    assert_eq!(normalize_default(&multiplier.default).as_deref(), Some("1"));
+
+    let pricing_source = get_column_info(&conn, "proxy_config", "pricing_model_source");
+    assert_eq!(pricing_source.r#type, "TEXT");
+    assert_eq!(pricing_source.notnull, 1);
+    assert_eq!(
+        normalize_default(&pricing_source.default).as_deref(),
+        Some("response")
+    );
+
+    let request_model = get_column_info(&conn, "proxy_request_logs", "request_model");
+    assert_eq!(request_model.r#type, "TEXT");
+    assert_eq!(request_model.notnull, 0);
+
+    assert_eq!(
+        Database::get_user_version(&conn).expect("version after migration"),
+        SCHEMA_VERSION
+    );
+}
+
+#[test]
+fn schema_create_tables_repairs_legacy_proxy_config_singleton_to_per_app() {
+    let conn = Connection::open_in_memory().expect("open memory db");
+
+    // 模拟测试版 v2：user_version=2，但 proxy_config 仍是单例结构（无 app_type）
+    Database::set_user_version(&conn, 2).expect("set user_version");
+    conn.execute_batch(
+        r#"
+        CREATE TABLE proxy_config (
+            id INTEGER PRIMARY KEY,
+            enabled INTEGER NOT NULL DEFAULT 0,
+            listen_address TEXT NOT NULL DEFAULT '127.0.0.1',
+            listen_port INTEGER NOT NULL DEFAULT 5000,
+            max_retries INTEGER NOT NULL DEFAULT 3,
+            request_timeout INTEGER NOT NULL DEFAULT 300,
+            enable_logging INTEGER NOT NULL DEFAULT 1,
+            target_app TEXT NOT NULL DEFAULT 'claude',
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+        INSERT INTO proxy_config (id, enabled) VALUES (1, 1);
+        "#,
+    )
+    .expect("seed legacy proxy_config");
+
+    Database::create_tables_on_conn(&conn).expect("create tables should repair proxy_config");
+
+    assert!(
+        Database::has_column(&conn, "proxy_config", "app_type").expect("check app_type"),
+        "proxy_config should be migrated to per-app structure"
+    );
+
+    let count: i32 = conn
+        .query_row("SELECT COUNT(*) FROM proxy_config", [], |r| r.get(0))
+        .expect("count rows");
+    assert_eq!(count, 3, "per-app proxy_config should have 3 rows");
+
+    // 新结构下应能按 app_type 查询
+    let _: i32 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM proxy_config WHERE app_type = 'claude'",
+            [],
+            |r| r.get(0),
+        )
+        .expect("query by app_type");
+}
+
+#[test]
+fn migration_from_v3_8_schema_v1_to_current_schema_v3() {
+    let conn = Connection::open_in_memory().expect("open memory db");
+    conn.execute("PRAGMA foreign_keys = ON;", [])
+        .expect("enable foreign keys");
+
+    // 模拟 v3.8.* 用户的数据库（schema v1）
+    conn.execute_batch(V3_8_SCHEMA_V1_SQL)
+        .expect("seed v3.8 schema v1");
+    Database::set_user_version(&conn, 1).expect("set user_version=1");
+
+    // 插入一条旧版 Provider + Skill（用于验证迁移不会破坏既有数据）
+    conn.execute(
+        "INSERT INTO providers (
+            id, app_type, name, settings_config, website_url, category,
+            created_at, sort_index, notes, icon, icon_color, meta, is_current
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+        params![
+            "p1",
+            "claude",
+            "Test Provider",
+            serde_json::to_string(&json!({ "anthropicApiKey": "sk-test" })).unwrap(),
+            Option::<String>::None,
+            Option::<String>::None,
+            Option::<i64>::None,
+            Option::<usize>::None,
+            Option::<String>::None,
+            Option::<String>::None,
+            Option::<String>::None,
+            "{}",
+            1,
+        ],
+    )
+    .expect("seed provider");
+
+    conn.execute(
+        "INSERT INTO skills (key, installed, installed_at) VALUES (?1, ?2, ?3)",
+        params!["claude:demo-skill", 1, 1700000000i64],
+    )
+    .expect("seed legacy skill");
+
+    // 按应用启动流程：先 create_tables（补齐新增表），再 apply_schema_migrations（按 user_version 迁移）
+    Database::create_tables_on_conn(&conn).expect("create tables");
+    Database::apply_schema_migrations_on_conn(&conn).expect("apply migrations");
+
+    assert_eq!(
+        Database::get_user_version(&conn).expect("user_version after migration"),
+        SCHEMA_VERSION
+    );
+
+    // v1 -> v2：providers 新增字段必须补齐
+    for column in [
+        "cost_multiplier",
+        "limit_daily_usd",
+        "limit_monthly_usd",
+        "provider_type",
+        "in_failover_queue",
+    ] {
+        assert!(
+            Database::has_column(&conn, "providers", column).expect("check column"),
+            "providers.{column} should exist after migration"
+        );
+    }
+
+    // 旧 provider 不应丢失，且新增字段应有默认值
+    let provider_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM providers WHERE id = 'p1' AND app_type = 'claude'",
+            [],
+            |r| r.get(0),
+        )
+        .expect("count providers");
+    assert_eq!(provider_count, 1);
+
+    let cost_multiplier: String = conn
+        .query_row(
+            "SELECT cost_multiplier FROM providers WHERE id = 'p1' AND app_type = 'claude'",
+            [],
+            |r| r.get(0),
+        )
+        .expect("read cost_multiplier");
+    assert_eq!(cost_multiplier, "1.0");
+
+    // v2 -> v3：skills 表重建为统一结构，并设置 pending 标记（后续由启动时扫描文件系统重建数据）
+    assert!(
+        Database::has_column(&conn, "skills", "enabled_claude").expect("check skills v3 column"),
+        "skills table should be migrated to v3 structure"
+    );
+    let skills_count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM skills", [], |r| r.get(0))
+        .expect("count skills");
+    assert_eq!(skills_count, 0, "skills table should be rebuilt empty");
+
+    let pending: Option<String> = conn
+        .query_row(
+            "SELECT value FROM settings WHERE key = 'skills_ssot_migration_pending'",
+            [],
+            |r| r.get(0),
+        )
+        .ok();
+    assert!(
+        matches!(pending.as_deref(), Some("true") | Some("1")),
+        "skills_ssot_migration_pending should be set after v2->v3 migration"
+    );
+    let snapshot: Option<String> = conn
+        .query_row(
+            "SELECT value FROM settings WHERE key = 'skills_ssot_migration_snapshot'",
+            [],
+            |r| r.get(0),
+        )
+        .ok();
+    let snapshot = snapshot.expect("skills migration snapshot should be recorded");
+    let snapshot_rows: serde_json::Value =
+        serde_json::from_str(&snapshot).expect("parse skills migration snapshot");
+    assert!(
+        snapshot_rows
+            .as_array()
+            .is_some_and(|rows| rows.iter().any(|row| {
+                row.get("directory").and_then(|v| v.as_str()) == Some("demo-skill")
+                    && row.get("app_type").and_then(|v| v.as_str()) == Some("claude")
+            })),
+        "skills migration snapshot should preserve legacy app mapping"
+    );
+
+    // v3.9+ 新增：proxy_config 三行 seed 必须存在（否则 UI 会查不到默认值）
+    let proxy_rows: i64 = conn
+        .query_row("SELECT COUNT(*) FROM proxy_config", [], |r| r.get(0))
+        .expect("count proxy_config rows");
+    assert_eq!(proxy_rows, 3);
+
+    // model_pricing 应具备默认数据（迁移时会 seed）
+    let pricing_rows: i64 = conn
+        .query_row("SELECT COUNT(*) FROM model_pricing", [], |r| r.get(0))
+        .expect("count model_pricing rows");
+    assert!(pricing_rows > 0, "model_pricing should be seeded");
+}
+
+#[test]
+fn schema_dry_run_does_not_write_to_disk() {
     // Create minimal valid config for migration
     let mut apps = HashMap::new();
     apps.insert("claude".to_string(), ProviderManager::default());
@@ -245,13 +624,15 @@ fn dry_run_validates_schema_compatibility() {
             meta: None,
             icon: None,
             icon_color: None,
-            is_proxy_target: Some(false),
+            in_failover_queue: false,
+            is_proxy_target: None,
         },
     );
 
-    let mut manager = ProviderManager::default();
-    manager.providers = providers;
-    manager.current = "test-provider".to_string();
+    let manager = ProviderManager {
+        providers,
+        current: "test-provider".to_string(),
+    };
 
     let mut apps = HashMap::new();
     apps.insert("claude".to_string(), manager);
@@ -275,7 +656,7 @@ fn dry_run_validates_schema_compatibility() {
 }
 
 #[test]
-fn model_pricing_is_seeded_on_init() {
+fn schema_model_pricing_is_seeded_on_init() {
     let db = Database::memory().expect("create memory db");
 
     let conn = db.conn.lock().expect("lock conn");
@@ -330,5 +711,34 @@ fn model_pricing_is_seeded_on_init() {
         gemini_count > 0,
         "应该包含 Gemini 模型定价，实际数量: {}",
         gemini_count
+    );
+}
+
+#[test]
+fn ensure_incremental_auto_vacuum_rebuilds_existing_file_db() {
+    let temp = NamedTempFile::new().expect("create temp db file");
+    let path = temp.path().to_path_buf();
+
+    let conn = Connection::open(&path).expect("open temp db");
+    conn.execute("PRAGMA auto_vacuum = NONE;", [])
+        .expect("set none auto_vacuum");
+    Database::create_tables_on_conn(&conn).expect("create tables");
+
+    assert_eq!(
+        Database::get_auto_vacuum_mode(&conn).expect("auto_vacuum before rebuild"),
+        0,
+        "existing file db should start with NONE auto_vacuum"
+    );
+
+    let rebuilt =
+        Database::ensure_incremental_auto_vacuum_on_conn(&conn).expect("enable incremental mode");
+    assert!(rebuilt, "existing db should require rebuild via VACUUM");
+    drop(conn);
+
+    let reopened = Connection::open(&path).expect("reopen temp db");
+    assert_eq!(
+        Database::get_auto_vacuum_mode(&reopened).expect("auto_vacuum after rebuild"),
+        2,
+        "file db should persist INCREMENTAL auto_vacuum after VACUUM rebuild"
     );
 }

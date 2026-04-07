@@ -4,25 +4,26 @@ import { Card, CardContent } from "@/components/ui/card";
 import { useUsageSummary } from "@/lib/query/usage";
 import { Activity, DollarSign, Layers, Database, Loader2 } from "lucide-react";
 import { motion } from "framer-motion";
+import { fmtUsd, parseFiniteNumber } from "./format";
 
 interface UsageSummaryCardsProps {
   days: number;
+  refreshIntervalMs: number;
 }
 
-export function UsageSummaryCards({ days }: UsageSummaryCardsProps) {
+export function UsageSummaryCards({
+  days,
+  refreshIntervalMs,
+}: UsageSummaryCardsProps) {
   const { t } = useTranslation();
 
-  const { startDate, endDate } = useMemo(() => {
-    const end = Math.floor(Date.now() / 1000);
-    const start = end - days * 24 * 60 * 60;
-    return { startDate: start, endDate: end };
-  }, [days]);
-
-  const { data: summary, isLoading } = useUsageSummary(startDate, endDate);
+  const { data: summary, isLoading } = useUsageSummary(days, {
+    refetchInterval: refreshIntervalMs > 0 ? refreshIntervalMs : false,
+  });
 
   const stats = useMemo(() => {
     const totalRequests = summary?.totalRequests ?? 0;
-    const totalCost = parseFloat(summary?.totalCost || "0");
+    const totalCost = parseFiniteNumber(summary?.totalCost);
 
     const inputTokens = summary?.totalInputTokens ?? 0;
     const outputTokens = summary?.totalOutputTokens ?? 0;
@@ -34,7 +35,7 @@ export function UsageSummaryCards({ days }: UsageSummaryCardsProps) {
 
     return [
       {
-        title: t("usage.totalRequests", "总请求数"),
+        title: t("usage.totalRequests"),
         value: totalRequests.toLocaleString(),
         icon: Activity,
         color: "text-blue-500",
@@ -42,15 +43,15 @@ export function UsageSummaryCards({ days }: UsageSummaryCardsProps) {
         subValue: null,
       },
       {
-        title: t("usage.totalCost", "总成本"),
-        value: `$${totalCost.toFixed(4)}`,
+        title: t("usage.totalCost"),
+        value: totalCost == null ? "--" : fmtUsd(totalCost, 4),
         icon: DollarSign,
         color: "text-green-500",
         bg: "bg-green-500/10",
         subValue: null,
       },
       {
-        title: t("usage.totalTokens", "总 Token 数"),
+        title: t("usage.totalTokens"),
         value: totalTokens.toLocaleString(),
         icon: Layers,
         color: "text-purple-500",
@@ -58,13 +59,13 @@ export function UsageSummaryCards({ days }: UsageSummaryCardsProps) {
         subValue: (
           <div className="flex flex-col gap-1 text-xs text-muted-foreground mt-3 pt-3 border-t border-border/50">
             <div className="flex justify-between items-center">
-              <span>Input</span>
+              <span>{t("usage.input")}</span>
               <span className="text-foreground/80">
                 {(inputTokens / 1000).toFixed(1)}k
               </span>
             </div>
             <div className="flex justify-between items-center">
-              <span>Output</span>
+              <span>{t("usage.output")}</span>
               <span className="text-foreground/80">
                 {(outputTokens / 1000).toFixed(1)}k
               </span>
@@ -73,7 +74,7 @@ export function UsageSummaryCards({ days }: UsageSummaryCardsProps) {
         ),
       },
       {
-        title: t("usage.cacheTokens", "缓存 Token"),
+        title: t("usage.cacheTokens"),
         value: totalCacheTokens.toLocaleString(),
         icon: Database,
         color: "text-orange-500",
@@ -81,13 +82,13 @@ export function UsageSummaryCards({ days }: UsageSummaryCardsProps) {
         subValue: (
           <div className="flex flex-col gap-1 text-xs text-muted-foreground mt-3 pt-3 border-t border-border/50">
             <div className="flex justify-between items-center">
-              <span>Write</span>
+              <span>{t("usage.cacheWrite")}</span>
               <span className="text-foreground/80">
                 {(cacheWriteTokens / 1000).toFixed(1)}k
               </span>
             </div>
             <div className="flex justify-between items-center">
-              <span>Read</span>
+              <span>{t("usage.cacheRead")}</span>
               <span className="text-foreground/80">
                 {(cacheReadTokens / 1000).toFixed(1)}k
               </span>

@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from "react";
+import React, { useState } from "react";
 import { GeminiEnvSection, GeminiConfigSection } from "./GeminiConfigSections";
 import { GeminiCommonConfigModal } from "./GeminiCommonConfigModal";
 
@@ -11,10 +11,13 @@ interface GeminiConfigEditorProps {
   useCommonConfig: boolean;
   onCommonConfigToggle: (checked: boolean) => void;
   commonConfigSnippet: string;
-  onCommonConfigSnippetChange: (value: string) => void;
+  onCommonConfigSnippetChange: (value: string) => boolean;
+  onCommonConfigErrorClear: () => void;
   commonConfigError: string;
   envError: string;
   configError: string;
+  onExtract?: () => void;
+  isExtracting?: boolean;
 }
 
 const GeminiConfigEditor: React.FC<GeminiConfigEditorProps> = ({
@@ -27,18 +30,19 @@ const GeminiConfigEditor: React.FC<GeminiConfigEditorProps> = ({
   onCommonConfigToggle,
   commonConfigSnippet,
   onCommonConfigSnippetChange,
+  onCommonConfigErrorClear,
   commonConfigError,
   envError,
   configError,
+  onExtract,
+  isExtracting,
 }) => {
   const [isCommonConfigModalOpen, setIsCommonConfigModalOpen] = useState(false);
 
-  // Auto-open common config modal if there's an error
-  useEffect(() => {
-    if (commonConfigError && !isCommonConfigModalOpen) {
-      setIsCommonConfigModalOpen(true);
-    }
-  }, [commonConfigError, isCommonConfigModalOpen]);
+  const handleCloseCommonConfigModal = () => {
+    onCommonConfigErrorClear();
+    setIsCommonConfigModalOpen(false);
+  };
 
   return (
     <div className="space-y-6">
@@ -48,26 +52,28 @@ const GeminiConfigEditor: React.FC<GeminiConfigEditorProps> = ({
         onChange={onEnvChange}
         onBlur={onEnvBlur}
         error={envError}
+        useCommonConfig={useCommonConfig}
+        onCommonConfigToggle={onCommonConfigToggle}
+        onEditCommonConfig={() => setIsCommonConfigModalOpen(true)}
+        commonConfigError={commonConfigError}
       />
 
       {/* Config JSON Section */}
       <GeminiConfigSection
         value={configValue}
         onChange={onConfigChange}
-        useCommonConfig={useCommonConfig}
-        onCommonConfigToggle={onCommonConfigToggle}
-        onEditCommonConfig={() => setIsCommonConfigModalOpen(true)}
-        commonConfigError={commonConfigError}
         configError={configError}
       />
 
       {/* Common Config Modal */}
       <GeminiCommonConfigModal
         isOpen={isCommonConfigModalOpen}
-        onClose={() => setIsCommonConfigModalOpen(false)}
+        onClose={handleCloseCommonConfigModal}
         value={commonConfigSnippet}
-        onChange={onCommonConfigSnippetChange}
+        onSave={onCommonConfigSnippetChange}
         error={commonConfigError}
+        onExtract={onExtract}
+        isExtracting={isExtracting}
       />
     </div>
   );

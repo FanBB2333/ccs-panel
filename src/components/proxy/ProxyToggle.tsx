@@ -1,69 +1,94 @@
 /**
  * 代理模式切换开关组件
- *
- * 放置在主界面头部，用于一键启用/关闭代理模式
- * 启用时自动接管 Live 配置，关闭时恢复原始配置
- *
- * 支持两种模式：
- * - 本地模式：直接修改本地配置文件
- * - 远程服务器模式：通过 SSH 隧道转发并修改远程配置
  */
 
-import { Radio, Loader2, Globe } from "lucide-react";
-import { Switch } from "@/components/ui/switch";
-import { useProxyStatus } from "@/hooks/useProxyStatus";
+import { Globe, Loader2, Radio } from "lucide-react";
+import { useTranslation } from "react-i18next";
 import { useServer } from "@/contexts/ServerContext";
+import { useProxyStatus } from "@/hooks/useProxyStatus";
+import type { AppId } from "@/lib/api";
 import { cn } from "@/lib/utils";
+import { Switch } from "@/components/ui/switch";
 
 interface ProxyToggleProps {
   className?: string;
+  activeApp: AppId;
 }
 
-export function ProxyToggle({ className }: ProxyToggleProps) {
-  // 获取当前选中的服务器
-  const { currentServerId, currentServer } = useServer();
-
-  console.log("[ProxyToggle] Render - currentServerId:", currentServerId, "currentServer:", currentServer?.name);
-
+export function ProxyToggle({ className, activeApp }: ProxyToggleProps) {
+  const { t } = useTranslation();
+  const { currentServer, currentServerId } = useServer();
   const {
+    isPending,
+    isRemoteServer,
     isRunning,
     isTakeoverActive,
-    startWithTakeover,
-    stopWithRestore,
-    isPending,
+    setTakeoverForApp,
     status,
-    isRemoteServer,
+    stopWithRestore,
+    takeoverStatus,
   } = useProxyStatus({ serverId: currentServerId });
 
-  console.log("[ProxyToggle] useProxyStatus - isRemoteServer:", isRemoteServer);
+  const takeoverEnabled = isRemoteServer
+    ? isTakeoverActive
+    : Boolean(takeoverStatus?.[activeApp]);
 
   const handleToggle = async (checked: boolean) => {
-    console.log("[ProxyToggle] handleToggle called - checked:", checked, "currentServerId:", currentServerId);
-    if (checked) {
-      await startWithTakeover();
-    } else {
-      await stopWithRestore();
+    try {
+      if (isRemoteServer && !checked) {
+        await stopWithRestore();
+        return;
+      }
+
+      await setTakeoverForApp({ appType: activeApp, enabled: checked });
+    } catch (error) {
+      console.error("[ProxyToggle] Toggle takeover failed:", error);
     }
   };
 
-  const isActive = isRunning && isTakeoverActive;
+  const appLabel =
+    activeApp === "claude"
+      ? "Claude"
+      : activeApp === "codex"
+        ? "Codex"
+        : activeApp === "gemini"
+          ? "Gemini"
+          : "OpenCode";
 
-  // 根据服务器类型显示不同的提示
-  const serverName = currentServer?.name || "本地";
-
-  const tooltipText = isActive
-    ? `代理模式运行中 (${serverName}) - ${status?.address}:${status?.port}\n切换供应商为热切换`
-    : `开启代理模式 (${serverName})\n${isRemoteServer ? "将通过 SSH 隧道接管远程配置" : "启用后自动接管 Live 配置"}`;
+  const serverLabel = currentServer?.name || t("server.localServer");
+  const tooltipText = isRemoteServer
+    ? takeoverEnabled
+      ? t("proxy.takeover.tooltip.active", {
+          appLabel: serverLabel,
+          address: status?.address,
+          port: status?.port,
+          defaultValue: `${serverLabel} 已接管 - ${status?.address}:${status?.port}`,
+        })
+      : t("proxy.takeover.tooltip.inactive", {
+          appLabel: serverLabel,
+          defaultValue: `通过 SSH 隧道接管 ${serverLabel} 的远程配置`,
+        })
+    : takeoverEnabled
+      ? isRunning
+        ? t("proxy.takeover.tooltip.active", {
+            appLabel,
+            address: status?.address,
+            port: status?.port,
+            defaultValue: `${appLabel} 已接管 - ${status?.address}:${status?.port}\n切换该应用供应商为热切换`,
+          })
+        : t("proxy.takeover.tooltip.broken", {
+            appLabel,
+            defaultValue: `${appLabel} 已接管，但代理服务未运行`,
+          })
+      : t("proxy.takeover.tooltip.inactive", {
+          appLabel,
+          defaultValue: `接管 ${appLabel} 的 Live 配置，让该应用请求走本地代理`,
+        });
 
   return (
     <div
       className={cn(
-        "flex items-center gap-2 px-3 py-1.5 rounded-lg transition-all cursor-default",
-        isActive
-          ? isRemoteServer
-            ? "bg-blue-500/10 border border-blue-500/30"
-            : "bg-emerald-500/10 border border-emerald-500/30"
-          : "bg-muted/50 hover:bg-muted",
+        "flex items-center gap-1 px-1.5 h-8 rounded-lg bg-muted/50 transition-all",
         className,
       )}
       title={tooltipText}
@@ -74,7 +99,7 @@ export function ProxyToggle({ className }: ProxyToggleProps) {
         <Globe
           className={cn(
             "h-4 w-4 transition-colors",
-            isActive
+            takeoverEnabled
               ? "text-blue-500 animate-pulse"
               : "text-muted-foreground",
           )}
@@ -83,29 +108,16 @@ export function ProxyToggle({ className }: ProxyToggleProps) {
         <Radio
           className={cn(
             "h-4 w-4 transition-colors",
-            isActive
+            takeoverEnabled
               ? "text-emerald-500 animate-pulse"
               : "text-muted-foreground",
           )}
         />
       )}
-      <span
-        className={cn(
-          "text-sm font-medium transition-colors select-none",
-          isActive
-            ? isRemoteServer
-              ? "text-blue-600 dark:text-blue-400"
-              : "text-emerald-600 dark:text-emerald-400"
-            : "text-muted-foreground",
-        )}
-      >
-        Proxy
-      </span>
       <Switch
-        checked={isActive}
+        checked={takeoverEnabled}
         onCheckedChange={handleToggle}
         disabled={isPending}
-        className="ml-1"
       />
     </div>
   );
